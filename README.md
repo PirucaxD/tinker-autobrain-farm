@@ -6,13 +6,41 @@ reacts to enemy disables and threats with defensive item saves and escapes.
 It never auto-engages enemy heroes. Offense and combo layers are planned
 follow-ups on the same shared `lib/`.
 
-Current build: **Tinker.lua v0.1.331**.
+Current build: **Tinker.lua v0.1.374**.
 
-## What changed since v0.1.265 (for returning testers)
+## What changed since v0.1.331 (for returning testers)
 
-The farm layer went through a long stabilization line and is now the best it
-has ever been (bot-game reference: GPM ~450 with zero deaths, ~90% wave
-coverage). Highlights:
+Real-game reference on this line: GPM roughly 420-500 with zero brain-owned
+deaths. Highlights:
+
+- **W1 lead timing rebuilt (v0.1.371 + v0.1.374).** The first March of a wave
+  is now timed to the casting position rather than to the hero, and the gate
+  that fires it got its own radius instead of borrowing the approach-stop
+  distance. The practical effect is that the robot stream and the creep wave
+  now meet at the stand instead of the robots arriving after the wave has
+  already walked past. Measured effective lead went from about 2.0s to about
+  3.3s against a geometric ideal of 3.7s.
+- **Death and respawn logging (v0.1.356).** Deaths were previously invisible
+  in the log. `--farm-report` now prints a DEATHS block with a save census per
+  death, so you can tell whether an escape existed and was on cooldown.
+- **Commit risk v2 (v0.1.358).** A farm commit is now priced with a travel
+  term, so a long trip into a lane an enemy can reach by the time you arrive
+  scores worse than the same lane does right now.
+- **Wave clock stamping fixed (v0.1.366).** Wave arrivals are stamped on the
+  spawn grid rather than on the moment Tinker showed up, which removed a
+  systematic error that rolled predicted arrivals a full period late.
+- **Rearm channel watchdog (v0.1.355).** A rearm interrupted mid-channel no
+  longer leaves the hero stuck; the stuck class went to zero.
+- **Observed-farmer fix (v0.1.349).** An ally merely walking past a camp no
+  longer marks it as being farmed. Camp retirement needs sustained presence.
+- **New analyzer reports.** `--clock-report` (lane cadence and lost waves),
+  `--time-report` (every second classified), `--state-report`, `--cycle-report`
+  and `--keen-report` join the original audits.
+
+Two housekeeping notes: `lib/vision.lua` is new and required, so pull the whole
+`lib/` folder, and `lib/save_select.lua` was removed (it had no callers).
+
+## What changed in the v0.1.265 to v0.1.331 line
 
 - **Faction parity fixed.** A depth-ruler defect made Dire games camp under
   the T1 instead of stepping forward to the wave meeting ground like Radiant
@@ -58,7 +86,9 @@ Machines, Rearm, Keen Conveyance, Blink):
   the long Rearm/Keen channels within a ready disabler's cast range, and
   learns enemy cooldowns from observed casts so it does not over-defer.
 
-Typical bot-game result on an itemless build: 450-600+ GPM with zero deaths.
+Typical result on an itemless build: 420-500 GPM with zero brain-owned deaths.
+GPM varies a lot with lane matchup and game length, and it ramps through a
+game, so short games read low. Do not compare two games of different lengths.
 
 ## Layout
 
@@ -66,7 +96,7 @@ Typical bot-game result on an itemless build: 450-600+ GPM with zero deaths.
 - `lib/` - hero-agnostic libraries: map/camp data, lane wave scanning and
   prediction, route planning, scheduling, navigation, escape and risk math,
   plus KV-generated game data. Pure logic is engine-stubbed and unit-tested.
-- `tools/run_tests.lua` - the offline test suite (753 tests, no game needed).
+- `tools/run_tests.lua` - the offline test suite (832 tests, no game needed).
 - `tools/parse_debuglog.lua` - the log analyzer (farm/depth audits, per-wave
   coverage, time and gold accounting, keen efficiency). Useful when
   reporting issues.
@@ -142,7 +172,7 @@ to get it fixed.
 Offline development loop:
 
 ```
-lua tools/run_tests.lua          # pure-Lua suite, expect 753 passing
+lua tools/run_tests.lua          # pure-Lua suite, expect 832 passing
 luac -p Tinker/Tinker.lua        # byte-compile check
 ```
 

@@ -152,6 +152,29 @@ function Schedule.Plan(ctx)
     if not ctx.safe then                                action, reason = "recover", "unsafe"
     elseif mana_at < (ctx.shove_cost or 0) then         action, reason = "recover", "mana"
     elseif slack <= 0 then                              action, reason = "shove", "due"
+    -- v0.1.360 TOP UP WHILE THERE IS TIME (user: "using two Ws is the main idea because it makes
+    -- more likely to not lose any creep. If we have time to refill, there is no reason to not do it
+    -- on lane phase"). Two Marches clear a full wave; one leaks creeps.
+    -- WHY IT LIVES HERE AND NOWHERE ELSE. A "shove" verdict is only ever reached at slack <= 0, i.e.
+    -- the wave is ALREADY DUE - so refusing a shove for mana cannot buy a refill that arrives in
+    -- time, it just abandons the wave, and reason=="mana" routes the hero to RETURN. The ONLY moment
+    -- the user's "if we have time" condition can be true is this slack branch, where the wave is not
+    -- due yet and the hero would otherwise go jungle. So: top up now, arrive funded, clear it in two.
+    -- BOUNDED THREE WAYS so it cannot become a fountain loop or a farming stall:
+    --   * ctx.shove_cost_full is nil outside lane phase (the hero only fills it while the enemy mid
+    --     T1 stands) and nil below Rearm level 1, so the deep era and the pre-ultimate game are
+    --     byte-identical to before;
+    --   * the refill must FIT the slack (recover_s), the same predicate recover_fits reports below;
+    --   * shove_cost itself is untouched, so the pre-existing mana verdict above is unchanged.
+    --   * and NEVER on a defend: reason=="mana" is one of the three verdicts defend_crash may not
+    --     override (v0.1.337 at :228), so without this clause a wave crashing OUR tower - zero
+    --     travel, zero depth risk, free farm - would be silently dropped at mana levels that fund a
+    --     Rearm and a March comfortably. A defend needs no Keen and no trip, so the two-cast TRIP
+    --     price is simply the wrong price for it.
+    elseif ctx.shove_cost_full and mana_at < ctx.shove_cost_full
+           and not ctx.defend_crash
+           and (ctx.recover_s == nil or slack >= ctx.recover_s) then
+                                                        action, reason = "recover", "mana"
     else                                                action, reason = "jungle", "slack" end
 
     -- shove vetoes, in the validated hero-cascade order. A FUNCTION since v0.1.197: the filler's
@@ -220,7 +243,14 @@ function Schedule.Plan(ctx)
     -- AND covers==false (v0.1.198 audit HOLE B: a real defense happens at OUR tower where a legal
     -- covering stand always exists; overriding no_safe_stand could commit a stand past the walk
     -- line that dpts==0 cannot see - depth points only count past the enemy T1 spot).
-    if ctx.defend_crash and action ~= "shove" and reason ~= "unsafe" and ctx.covers ~= false then
+    -- v0.1.337: nor the MANA verdict (g337 t=627: a 240-mana defend raid keened in, cast
+    -- NOTHING, keened home - an unfundable defense recovers first and re-fires next decide).
+    -- v0.1.337.1 (final-review find): nor BELOW THE HP BAR - the hp predicate is checked HERE,
+    -- not via reason, because a jungle/slack verdict skips the :213 low_hp rule entirely
+    -- (action ~= shove there) and a reason-only exception would cover just the flip-back half.
+    if ctx.defend_crash and action ~= "shove" and reason ~= "unsafe"
+       and reason ~= "mana" and ctx.covers ~= false
+       and not (ctx.hp_frac and ctx.min_hp_frac and ctx.hp_frac < ctx.min_hp_frac) then
         action, reason = "shove", "defend_crash"
     end
 
@@ -229,6 +259,34 @@ function Schedule.Plan(ctx)
              casts = cl.casts, t_clear = cl.t_clear,
              mana_at_leave_by = mana_at,
              recover_fits = (action ~= "recover") or (ctx.recover_s == nil) or slack >= ctx.recover_s }
+end
+
+---THE CYCLE ARC (v0.1.339, TINKER_CYCLE_MACHINE_DESIGN.md; the .302 resurrect): what the
+---NEXT full wave cycle costs - two casts with their rearms and the keens out+home. Pure.
+---c = { w, rearm, keen }  (live per-level mana values, hero-read)
+function Schedule.WaveCycleCost(c)
+    c = c or {}
+    return 2 * ((c.w or 0) + (c.rearm or 0) + (c.keen or 0))
+end
+
+---the fountain-vs-park decision for a window no farm fill claimed (design sec 3; the
+---v0.1.340 g341 re-calibration): the TRIGGER is the .296 broke floor ONLY - fountain iff
+---the pool cannot fund the NEXT WAVE (hop cost + reserve). The FILL keeps the .302
+---semantics: need = the cycle cost floored at the broke bar, capped at max_pool - when he
+---goes, he fills for the full next cycle. HISTORY: v0.1.339 used the cycle cost as the
+---TRIGGER too, which read STRICTER at Keen L1 than the old 70-percent rule (630-670 vs
+---~460-520) - pools 577-642 that used to hold the forward tether posture fountained
+---instead (g341: home-refills 25 -> 31, fountain 16.6 -> 22.3 pct, tether 21.6 -> 6.8
+---pct, GPM 489 -> 356). Trigger on survival, fill for the cycle. Park otherwise.
+---ctx = { pool, max_pool, cycle_cost, broke_bar }
+function Schedule.CycleFill(ctx)
+    ctx = ctx or {}
+    local pool = ctx.pool or 0
+    if pool < (ctx.broke_bar or 0) then
+        local need = math.max(ctx.cycle_cost or 0, ctx.broke_bar or 0)
+        return { fill = "fountain", need = math.min(need, ctx.max_pool or need) }
+    end
+    return { fill = "park" }
 end
 
 ---Stacking window (v0.1.224): neutral camps respawn at each game-clock minute when the box is

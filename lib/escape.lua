@@ -58,6 +58,7 @@
 ---v0.5.75.
 
 local Target = require("lib.target")
+local Vision = require("lib.vision")   -- v0.1.354: the last-seen source; see the note in FogSnapshot
 
 local UO = Enum.UnitOrder
 
@@ -683,9 +684,16 @@ function Escape.FogSnapshot(me, opts)
             if pos then
                 local age, probable_radius = 0, 0
                 if not visible then
-                    local last_t = Hero.GetLastVisibleTime
-                                   and Hero.GetLastVisibleTime(e) or nil
-                    age = (last_t and (t - last_t)) or 0
+                    -- v0.1.354: was `Hero.GetLastVisibleTime`, which is DEAD - measured nil
+                    -- on 405 of 405 fogged reads in one 895s match (Tinker g353), so this
+                    -- line produced age 0 ALWAYS and the whole COR-1 decay below it has
+                    -- never run. lib/vision owns its clock, so the old cross-clock
+                    -- subtraction against `t` is gone with it (that mismatch - DOTA clock
+                    -- minus engine clock - was the red herring that consumed a whole arc).
+                    -- nil still means "never observed", and `or 0` turns that into
+                    -- "fresh visible": byte-for-byte the pre-vision behaviour, so an inert
+                    -- tracker changes nothing for any hero.
+                    age = Vision.Age(e) or 0
                     if age < 0 then age = 0 end
                     if age > PROBE_MAX_AGE_S then age = PROBE_MAX_AGE_S end
                     probable_radius = age * max_ms
@@ -1306,6 +1314,100 @@ function Escape.BlinkInLanding(me, aim_pos, blink_range, engage_range, opts)
         reachable = (math.sqrt(adx * adx + ady * ady) <= engage_range)
     end
     return landing, Escape.AdvanceRiskScore(me, landing, opts), reachable
+end
+
+---Commit-risk exposure -> a radius WIDENING distance, in units.
+---travel_s is SUPPLIED BY THE CALLER (Tinker feeds the keen-aware
+---Lane.InterceptETA travel_to_mid it already computes), so there is no
+---distance, no move-speed divisor and no division at all in here: that is
+---what keeps 0/0, inf and NaN out of the result at the source.
+---approach_speed <= 0 returns 0 = the documented no-code-edit kill switch,
+---and the <= (not ==) is the guard that matters: a NEGATIVE speed without it
+---yields a negative widen, which SHRINKS every danger radius and makes the
+---bot blind rather than cautious, silently and exactly backwards.
+---The clamp is math.min(cap, math.max(0, w)) IN THAT ORDER. Measured on the
+---deployed Lua 5.4: math.max(0, nan) = 0 while math.min(cap, nan) = cap, so
+---this ordering sends a NaN to 0 (today's behaviour) rather than to the
+---maximum widening. The reverse order returns cap.
+---@param travel_s number|nil seconds to reach the point (0 for a transit sample)
+---@param stand_s number|nil seconds standing there after arrival
+---@param approach_speed number|nil u/s an unseen enemy is assumed to close at
+---@param widen_max number|nil cap in units; nil = UNCAPPED (0 means zero widen,
+---  which is what the parameter name says; v0.1.357 shipped 0 = uncapped and
+---  that asymmetry is a footgun in the dangerous direction). A NEGATIVE or NaN
+---  cap is sanitised to 0: the clamp order defends the exposure argument only,
+---  and min(cap, .) passes a bad cap straight through, so a mis-signed cap is
+---  the SAME "blind rather than cautious" failure as a negative speed arriving
+---  through the other parameter (a negative widen SHRINKS the danger radius;
+---  a NaN one makes `edge < r_eff` false for every enemy at every distance, so
+---  every destination reads safe - the exact defect being fixed, arriving
+---  silently through the fix). `not (cap >= 0)` catches both in one comparison.
+---@return number widen, always finite and >= 0 for every input
+function Escape.CommitWiden(travel_s, stand_s, approach_speed, widen_max)
+    approach_speed = approach_speed or 0
+    if approach_speed <= 0 then return 0 end
+    local cap = widen_max or math.huge
+    if not (cap >= 0) then cap = 0 end
+    local w = approach_speed * ((travel_s or 0) + (stand_s or 0))
+    return math.min(cap, math.max(0, w))
+end
+
+---Keyed throttle for a diagnostic line. Returns true if the caller should
+---emit, and stamps ONLY THEN. Distinct keys never starve each other: a single
+---shared stamp aliases to whichever call site runs first, which is the
+---v0.1.357 trap where hundreds of calls per decide sampled only the first.
+---A BACKWARDS clock (match transition, or the measured ~102s pregame plateau
+---where GetDOTATime is pinned at exactly 0.0) emits rather than suppressing:
+---an instrument's failure direction must be noisy, never silent.
+function Escape.DiagGate(stamps, key, t, window)
+    local dt = t - (stamps[key] or -math.huge)
+    if dt >= 0 and dt < window then return false end
+    stamps[key] = t
+    return true
+end
+
+---Nearest enemy EDGE distance to pt, using the SAME edge rule as
+---FogProximityRisk (visible = plain distance; fogged = distance minus the
+---age disc, floored at 0). INSTRUMENT ONLY, never gates anything.
+---FogProximityRisk returns exactly 0 for everything past its radius, so a
+---logged risk of 0.00 cannot distinguish "widen too small" from "nobody
+---there". 45% of g356's destination reads (91 of 204, and 43 of 73 commits)
+---are censored that way, which is why the last calibration had to quote a
+---strict worst case instead of a distribution. Returns math.huge on an empty
+---snapshot so "no enemies" is distinguishable from "enemy at 0u".
+---
+---Deliberately carries NO age_cap gate, unlike the risk kernel at :897: the
+---kernel drops a stale ghost because it refuses to SCORE it, but an
+---instrument that drops the same ghost logs ne=inf next to r1=0.00 and the
+---calibration hole this field exists to fill reopens. It reports geometry,
+---the kernel decides what geometry is worth.
+---
+---Component math on .x/.y, never pt:Distance2D: pt crosses the hero->lib
+---boundary and callers pass plain {x,y} tables as well as engine Vectors
+---(the v0.1.247 stuck-in-DECIDE crash), the same type-boundary law as
+---FogProximityRisk's local d2 at :890 and ReachableFog at :784.
+---@param snap table|nil FogSnapshot result { heroes = {{pos, age, visible}} }
+---@param pt table|nil {x, y} plain table or engine Vector
+---@param opts table|nil {fog_ms=550} disc-growth rate, matches FogProximityRisk
+---@return number edge distance in units, math.huge when there is nobody to measure
+function Escape.NearestEnemyEdge(snap, pt, opts)
+    local hs = snap and snap.heroes
+    if not (hs and pt) then return math.huge end
+    local fog_ms = (opts and opts.fog_ms) or 550
+    local best = math.huge
+    for i = 1, #hs do
+        local h = hs[i]
+        if h and h.pos then
+            local dx, dy = (h.pos.x or 0) - (pt.x or 0), (h.pos.y or 0) - (pt.y or 0)
+            local edge = math.sqrt(dx * dx + dy * dy)
+            if not h.visible then
+                edge = edge - (h.age or 0) * fog_ms
+                if edge < 0 then edge = 0 end
+            end
+            if edge < best then best = edge end
+        end
+    end
+    return best
 end
 
 return Escape

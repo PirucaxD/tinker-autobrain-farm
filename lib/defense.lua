@@ -892,7 +892,15 @@ local function run_chain_walk(self, intent, threat_mod, threat_caster,
         elseif not is_authoritative and not tether_breaks_ok(c, save_name, threat_mod, threat_caster) then
             c.tlog(3, "save_chain_skip", { save = fire_entry.short, reason = "tether_unreachable" })
         elseif not c.save_is_ready(save_name) then
-            c.tlog(3, "save_chain_skip", { save = fire_entry.short, reason = "not_ready" })
+            -- v0.1.356: "not_ready" conflated NOT OWNED with ON COOLDOWN, which made post-mortems
+            -- read backwards. A Tinker death showed 9 saves `not_ready` and looked like a total
+            -- save-layer failure; in truth he owns ONE escape and it was on cooldown - the other
+            -- eight were never in the inventory. Optional hook, so a hero that does not supply
+            -- `save_is_owned` logs exactly what it logged before.
+            local owned = c.save_is_owned and c.save_is_owned(save_name)
+            c.tlog(3, "save_chain_skip", {
+                save = fire_entry.short,
+                reason = (c.save_is_owned and not owned) and "not_owned" or "not_ready" })
         elseif catalog_defer_t then
             c.tlog(3, "save_chain_skip", {
                 save = fire_entry.short, reason = "cast_point_too_early",
@@ -1344,6 +1352,50 @@ local function _dist2d(a_unit, b_unit)
     return math.sqrt(dx * dx + dy * dy)
 end
 
+-- Remaining seconds on a named modifier, or nil when it cannot be read.
+--
+-- v0.1.352: every reader in this file used to call `NPC.GetModifierRemaining`,
+-- WHICH DOES NOT EXIST in the UCZone API (gitbook-verified: the NPC page documents
+-- GetModifier / GetModifiers / HasModifier / HasAnyModifier / GetModifierByIndex /
+-- GetModifierProperty / GetModifierPropertyHighest, and no remaining-duration
+-- reader). Each call site guarded on the field before calling it, so the guard was
+-- ALWAYS false, the pcall never ran, and every site silently took its own default
+-- forever. Confirmed live in g352: 5 x `eta_resolver_fallback ... ttl=2.00`.
+--
+-- The documented path is NPC.GetModifier -> Modifier.GetDieTime, differenced
+-- against GameRules.GetGameTime; both are "game time" per the docs, so the
+-- subtraction is same-clock.
+--
+-- SANITY BAND, and it is load-bearing: a result outside (0, MOD_REMAINING_MAX_S]
+-- is treated as UNREADABLE and returns nil, so every caller degrades to exactly
+-- its pre-fix default rather than inventing a lock. This codebase has already paid
+-- for the opposite choice once - the fog-age model differenced two DIFFERENT clocks,
+-- went negative, clamped to zero, and silently disabled five constants for 275
+-- versions. If GetDieTime ever turns out to sit on another clock, this fix goes
+-- quiet instead of locking saves out for a minute and a half.
+local MOD_REMAINING_MAX_S = 30      -- Doom (16s) is the longest debuff worth locking on; a
+                                    -- pregame-offset mismatch reads ~90s and is refused
+local function _mod_remaining(unit, mod_name)
+    if not (unit and mod_name) then return nil end
+    if Entity.IsEntity and not Entity.IsEntity(unit) then return nil end
+    if not (NPC.GetModifier and Modifier and Modifier.GetDieTime
+            and GameRules and GameRules.GetGameTime) then return nil end
+    local ok, rem = pcall(function()
+        local m = NPC.GetModifier(unit, mod_name)
+        if not m then return nil end
+        local die = Modifier.GetDieTime(m)
+        if type(die) ~= "number" then return nil end
+        return die - GameRules.GetGameTime()
+    end)
+    if not ok or type(rem) ~= "number" then return nil end
+    -- POSITIVE form, deliberately: `rem <= 0 or rem > MAX` lets NaN through, because every
+    -- NaN comparison is false. A NaN would reach clamp_ttl, survive math.min/math.max
+    -- (which propagate it), and stamp a lock whose expiry test is never true - a lock that
+    -- never releases. Phrasing it as "must be inside the band" refuses NaN for free.
+    if not (rem > 0 and rem <= MOD_REMAINING_MAX_S) then return nil end
+    return rem
+end
+
 ---Pre-cast / cast-point class. Returns a resolver that prefers
 ---armed.cast_point + armed.arm_t (stamped at arm-time, drift-free); falls
 ---back to a pcall-wrapped live `Ability.GetCastPoint(handle, true)`, then
@@ -1371,22 +1423,20 @@ function Defense.EtaResolvers.CastPoint(cp_default, floor_s)
     end
 end
 
----Active-debuff class. Returns a resolver that reads
----`NPC.GetModifierRemaining(target, mod_name)`. cap_s clamps so the periodic
----re-fire pattern (persistent_threats_tick) can re-acquire before the lock
----TTL elapses. Pcall-wrapped because NPC.GetModifierRemaining is not always
----bound; if absent rem stays 0 and floors to floor_s (safe, minimal lock).
+---Active-debuff class. Returns a resolver that reads the target's remaining
+---time on `mod_name` via `_mod_remaining` (NPC.GetModifier -> Modifier.GetDieTime
+---minus GameRules.GetGameTime; see its header for why the obvious-looking
+---`NPC.GetModifierRemaining` is NOT used - it does not exist). cap_s clamps so the
+---periodic re-fire pattern (persistent_threats_tick) can re-acquire before the
+---lock TTL elapses. An unreadable modifier leaves rem at 0 and floors to floor_s
+---(safe, minimal lock) - i.e. exactly the pre-v0.1.352 behaviour.
 ---@param mod_name string  target-side modifier to read remaining-time from
 ---@param cap_s number?  upper clamp (default unlimited)
 ---@param floor_s number?  lower clamp (default 0.1)
 function Defense.EtaResolvers.Remaining(mod_name, cap_s, floor_s)
     floor_s = floor_s or 0.1
     return function(_caster, target, _armed, _ab, _now_t)
-        local rem = 0
-        if target and Entity.IsEntity and Entity.IsEntity(target) and NPC.GetModifierRemaining then
-            local ok, v = pcall(NPC.GetModifierRemaining, target, mod_name)
-            if ok and type(v) == "number" then rem = v end
-        end
+        local rem = _mod_remaining(target, mod_name) or 0
         if cap_s and rem > cap_s then rem = cap_s end
         if rem < floor_s then rem = floor_s end
         return rem
@@ -1434,10 +1484,10 @@ end
 ---TD (so the lib doesn't take a circular dependency on threat_data). The
 ---closure consumes the canonical_mod 6th arg from resolve_ttl and looks up
 ---the catalog's THREAT_ARRIVAL_TIMING entry. Branches by entry.kind:
----  channel_at_caster -> caster-side NPC.GetModifierRemaining
+---  channel_at_caster -> caster-side remaining (_mod_remaining), else cast_point
 ---  cast_point_*      -> cast_point + post_cast_delay
 ---  homing kinds      -> dist(caster, target) / speed_fallback
----  no catalog        -> target-side NPC.GetModifierRemaining
+---  no catalog        -> target-side remaining (_mod_remaining)
 ---  no data           -> nil (lib falls back to cfg.fallback_lock_ttl_s)
 ---@param TD table  ThreatData module (lib.threat_data)
 ---@param opts table?  { lock_cap_s = number }  default 1.7s
@@ -1449,12 +1499,7 @@ function Defense.MakeGenericEtaResolver(TD, opts)
         local entry = TD.THREAT_ARRIVAL_TIMING[mod_name]
         if entry then
             if entry.kind == "channel_at_caster" then
-                local rem = 0
-                if caster and Entity.IsEntity and Entity.IsEntity(caster)
-                   and NPC.GetModifierRemaining then
-                    local ok, v = pcall(NPC.GetModifierRemaining, caster, mod_name)
-                    if ok and type(v) == "number" and v > 0 then rem = v end
-                end
+                local rem = _mod_remaining(caster, mod_name) or 0
                 if rem > 0 then
                     if rem > lock_cap_s then rem = lock_cap_s end
                     if rem < 0.1 then rem = 0.1 end
@@ -1476,15 +1521,11 @@ function Defense.MakeGenericEtaResolver(TD, opts)
                 return eta
             end
         end
-        if target and Entity.IsEntity and Entity.IsEntity(target)
-           and NPC.GetModifierRemaining then
-            local ok, v = pcall(NPC.GetModifierRemaining, target, mod_name)
-            if ok and type(v) == "number" and v > 0 then
-                local rem = v
-                if rem > lock_cap_s then rem = lock_cap_s end
-                if rem < 0.1 then rem = 0.1 end
-                return rem
-            end
+        local rem = _mod_remaining(target, mod_name)
+        if rem then
+            if rem > lock_cap_s then rem = lock_cap_s end
+            if rem < 0.1 then rem = 0.1 end
+            return rem
         end
         return nil
     end

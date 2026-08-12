@@ -194,6 +194,8 @@ ThreatData.THREAT_PROFILE = {
         note="No-target instant burst centered on Earthshaker: initial magical damage + echo magical damage per nearby unit, no stun. Liquipedia confirms: magica..." },
     ["modifier_enigma_black_hole"] = { school="pure", damage_type="pure", pierces_spell_immunity=true, dispellable="none", delivery="channel", positional=true, primary_harm="disable", timing="pre_cast", lotus_reflectable=false, zone_outlasts_cyclone=true,
         note="Liquipedia confirms: point-target channelled AoE (420 inner radius) that pulls+disables, 4s max channel (zone_outlasts_cyclone=true, >2.5s), PURE d..." },
+    ["modifier_enigma_black_hole_pull"] = { school="pure", damage_type="pure", pierces_spell_immunity=true, dispellable="none", delivery="channel", positional=true, primary_harm="disable", timing="pre_cast", lotus_reflectable=false, zone_outlasts_cyclone=true,
+        note="Liquipedia confirms: point-target channelled AoE (420 inner radius) that pulls+disables, 4s max channel (zone_outlasts_cyclone=true, >2.5s), PURE d..." },  -- 2026-07-28: VPK-verified alias, the bare key above does not exist in any of the 664 paks
     ["modifier_kez_grappling_claw_slow"] = { school="physical", damage_type="physical", pierces_spell_immunity=false, dispellable="none", delivery="attack", primary_harm="damage", timing="at_impact", severity="survivable", drop_kinds={"invis"}, add_kinds={"displacement_blink", "reflect_target"},
         note="CONFLICT: Batch KV listed dt as 'none (PHYSICAL hit - VERIFY)'; Liquipedia + ability_data.lua (line 617, behavior unit_target, instant attack on ar..." },
     ["modifier_legion_commander_duel"] = { school="physical", damage_type="none", pierces_spell_immunity=true, dispellable="none", delivery="attack", primary_harm="disable", timing="reactive", forced_leash=true, lotus_reflectable=false, severity="lethal",
@@ -238,6 +240,8 @@ ThreatData.THREAT_PROFILE = {
         note="v0.5.149 Blast Off! (techies_suicide, KV ID 5601). POINT+AOE, magical, spell_immunity enemies_no (=> pierces=false), dispellable yes (basic). cast_point 1.0 then a FIXED 0.75s leap (KV duration 0.75), 400 radius, 200/300/400/500 magical + 0.8-1.4s stun + 20% self hp_cost. The COMBO TRIGGER (Land Mines + Sticky Bomb detonate with the landing) so THREAT_SEVERITY=high (not withheld by low_severity_high_hp). delivery=leap => DeriveCounters keeps invuln (WW/Eul, v0.5.143 leap rule) + displacement (Force/Pike/Blink, out of the 400 AoE) + magic_immune (BKB eats the magical burst + the stun). modseen-confirmed: modifier_techies_suicide_leap is created on Techies in-flight (demo closing 496->239u) => OnModifierCreate arms it by proximity like Slark/Huskar. NOTE: an already-LATCHED Sticky Bomb still rides Force/Pike/WW (log _windwaker variant); BKB/Eul-invuln answer that, but the leap itself is fully dodged here." },
     ["modifier_slark_pounce"] = { school="magical", damage_type="magical", pierces_spell_immunity=false, dispellable="none", delivery="leap", primary_harm="disable", timing="at_impact", lotus_reflectable=false, severity="survivable",
         note="CONFLICT: none (KV damage_type=magical but pounce_damage=0 so primary_harm=disable not damage; spell_immunity=enemies_no => pierces=false matches L..." },
+    ["modifier_slark_pounce_leash"] = { school="magical", damage_type="magical", pierces_spell_immunity=false, dispellable="none", delivery="leap", primary_harm="disable", timing="at_impact", lotus_reflectable=false, severity="survivable",
+        note="CONFLICT: none (KV damage_type=magical but pounce_damage=0 so primary_harm=disable not damage; spell_immunity=enemies_no => pierces=false matches L..." },  -- 2026-07-28: VPK-verified alias, the bare key above does not exist in any of the 664 paks
     ["modifier_spirit_breaker_charge_of_darkness"] = { school="magical", damage_type="none", pierces_spell_immunity=false, dispellable="none", delivery="homing_charge", primary_harm="disable", timing="at_impact", severity="lethal",
         note="CONFLICT: Liquipedia phrases spell immunity as 'pierces Debuff Immunity conditionally', but KV spell_immunity=enemies_no => pierces=false and the r..." },
     ["modifier_sven_storm_bolt"] = { school="magical", damage_type="magical", pierces_spell_immunity=false, dispellable="strong", delivery="projectile_homing", targeted=true, primary_harm="disable", timing="at_impact", add_kinds={"invuln", "reflect_target"},
@@ -284,10 +288,14 @@ ThreatData.THREAT_PROFILE = {
         note="Hairball is a point-target projectile that erupts and applies a slow debuff. KV dt=nil => damage_type=none; this slow modifier carries no damage. s..." },
     ["modifier_broodmother_sticky_snare"] = { school="magical", damage_type="magical", pierces_spell_immunity=false, dispellable="basic", delivery="spell", primary_harm="disable", timing="post_apply", lotus_reflectable=false, severity="survivable", add_kinds={"magic_barrier"},
         note="Aghanim placed web trap: roots for ~2.75s and deals 100 magical DPS (~300 over 3s). KV magical + enemies_no(no-pierce) + disp yes(basic). Primary h..." },
+    ["modifier_broodmother_sticky_snare_root"] = { school="magical", damage_type="magical", pierces_spell_immunity=false, dispellable="basic", delivery="spell", primary_harm="disable", timing="post_apply", lotus_reflectable=false, severity="survivable", add_kinds={"magic_barrier"},
+        note="Aghanim placed web trap: roots for ~2.75s and deals 100 magical DPS (~300 over 3s). KV magical + enemies_no(no-pierce) + disp yes(basic). Primary h..." },  -- 2026-07-28: VPK-verified alias, the bare key above does not exist in any of the 664 paks
     ["modifier_chaos_knight_chaos_bolt"] = { school="magical", damage_type="magical", pierces_spell_immunity=false, dispellable="strong", delivery="spell", targeted=true, primary_harm="disable", timing="pre_cast", severity="lethal", add_kinds={"dispel_strong"},
         note="Unit-target parabolic projectile, random stun 1.25-3.25s (primary_harm=disable) + random magical damage. KV magical + enemies_no(no-pierce) + disp ..." },
     ["modifier_chaos_knight_reality_rift"] = { school="magical", damage_type="none", pierces_spell_immunity=false, dispellable="basic", delivery="spell", targeted=true, primary_harm="displacement", timing="post_apply", severity="survivable", drop_kinds={"magic_immune"}, add_kinds={"dispel_basic"},
         note="CONFLICT: KV beh lists root_disables but Liquipedia confirms Reality Rift does NOT root or disarm the target after the pull; the flag reflects the ..." },
+    ["modifier_chaos_knight_reality_rift_debuff"] = { school="magical", damage_type="none", pierces_spell_immunity=false, dispellable="basic", delivery="spell", targeted=true, primary_harm="displacement", timing="post_apply", severity="survivable", drop_kinds={"magic_immune"}, add_kinds={"dispel_basic"},
+        note="CONFLICT: KV beh lists root_disables but Liquipedia confirms Reality Rift does NOT root or disarm the target after the pull; the flag reflects the ..." },  -- 2026-07-28: VPK-verified alias (_debuff = the VICTIM-side name); bare key absent from all 664 paks
     ["modifier_chen_penitence"] = { school="pure", damage_type="pure", pierces_spell_immunity=false, dispellable="basic", delivery="spell", targeted=true, primary_harm="disable", timing="post_apply", severity="survivable", add_kinds={"magic_immune"},
         note="Unit-target debuff: slow (12-30%) + damage amplification for 5-8s, plus a small pure-damage instance on cast. KV pure + enemies_no(no-pierce) + dis..." },
     ["modifier_chilling_touch_slow"] = { school="magical", damage_type="none", pierces_spell_immunity=false, dispellable="basic", delivery="attack", primary_harm="disable", timing="post_apply", lotus_reflectable=false, severity="survivable",
@@ -340,6 +348,8 @@ ThreatData.THREAT_PROFILE = {
         note="CONFLICT: RESOLVED - batch KV labelled this nil/nil/nil because the auto-mapper queried 'faceless_void_timelock'; the real KV ability is 'faceless_..." },
     ["modifier_furion_sprout"] = { school="none", damage_type="none", pierces_spell_immunity=false, dispellable="none", delivery="spell", positional=true, primary_harm="disable", timing="pre_cast", lotus_reflectable=false, zone_outlasts_cyclone=true, severity="survivable",
         note="CONFLICT: none on dispel - the modifier_furion_sprout KV (lib/ability_data.lua line 464) has no spell_immunity and no dispellable field, so per the..." },
+    ["modifier_furion_sprout_entangle"] = { school="none", damage_type="none", pierces_spell_immunity=false, dispellable="none", delivery="spell", positional=true, primary_harm="disable", timing="pre_cast", lotus_reflectable=false, zone_outlasts_cyclone=true, severity="survivable",
+        note="CONFLICT: none on dispel - the modifier_furion_sprout KV (lib/ability_data.lua line 464) has no spell_immunity and no dispellable field, so per the..." },  -- 2026-07-28: VPK-verified alias, the bare key above does not exist in any of the 664 paks
     ["modifier_grimstroke_ink_creature"] = { school="magical", damage_type="magical", pierces_spell_immunity=false, dispellable="none", delivery="projectile_homing", primary_harm="disable", timing="at_impact", lotus_reflectable=false, severity="survivable", drop_kinds={"displacement_blink"}, add_kinds={"invuln"},
         note="KV: magical, si enemies_no (no pierce), disp no, behavior unit_target. Phantom's Embrace summons a phantom projectile (speed 1150) that travels to ..." },
     ["modifier_grimstroke_soul_chain"] = { school="magical", damage_type="none", pierces_spell_immunity=true, dispellable="none", delivery="spell", targeted=true, primary_harm="disable", timing="post_apply", forced_leash=true, lotus_reflectable=false, severity="survivable", add_kinds={"displacement_blink"},
@@ -414,8 +424,12 @@ ThreatData.THREAT_PROFILE = {
         note="CONFLICT: None. KV (mars_gods_rebuke): damage_type=physical, behavior=point+normal_when_stolen, si/disp nil. school=physical, damage_type=physical,..." },
     ["modifier_mars_spear"] = { school="magical", damage_type="magical", pierces_spell_immunity=false, dispellable="strong", delivery="projectile_line", primary_harm="disable", timing="at_impact", lotus_reflectable=false, severity="lethal",
         note="CONFLICT: Minor: Liquipedia tooltip says 'dispellable only by death' for the pin, but KV (mars_spear) dispellable=yes_strong governs => dispellable..." },
+    ["modifier_mars_spear_stun"] = { school="magical", damage_type="magical", pierces_spell_immunity=false, dispellable="strong", delivery="projectile_line", primary_harm="disable", timing="at_impact", lotus_reflectable=false, severity="lethal",
+        note="CONFLICT: Minor: Liquipedia tooltip says 'dispellable only by death' for the pin, but KV (mars_spear) dispellable=yes_strong governs => dispellable..." },  -- 2026-07-28: VPK-verified alias, the bare key above does not exist in any of the 664 paks
     ["modifier_medusa_gorgon_grasp"] = { school="physical", damage_type="physical", pierces_spell_immunity=false, dispellable="basic", delivery="spell", positional=true, primary_harm="disable", timing="pre_cast", lotus_reflectable=false, severity="survivable", add_kinds={"magic_immune"},
         note="CONFLICT: None. KV (medusa_gorgon_grasp): damage_type=physical, spell_immunity=enemies_no (pierces=false), dispellable=yes (basic), behavior=aoe+po..." },
+    ["modifier_medusa_gorgon_grasp_root"] = { school="physical", damage_type="physical", pierces_spell_immunity=false, dispellable="basic", delivery="spell", positional=true, primary_harm="disable", timing="pre_cast", lotus_reflectable=false, severity="survivable", add_kinds={"magic_immune"},
+        note="CONFLICT: None. KV (medusa_gorgon_grasp): damage_type=physical, spell_immunity=enemies_no (pierces=false), dispellable=yes (basic), behavior=aoe+po..." },  -- 2026-07-28: VPK-verified alias, the bare key above does not exist in any of the 664 paks
     ["modifier_medusa_mystic_snake"] = { school="magical", damage_type="magical", pierces_spell_immunity=false, dispellable="none", delivery="spell", targeted=true, primary_harm="damage", timing="pre_cast", severity="survivable",
         note="CONFLICT: None. KV (medusa_mystic_snake): damage_type=magical, spell_immunity=enemies_no (pierces=false), behavior=unit_target. dispellable nil => ..." },
     ["modifier_meepo_earthbind"] = { school="magical", damage_type="none", pierces_spell_immunity=false, dispellable="basic", delivery="spell", positional=true, primary_harm="disable", timing="pre_cast", lotus_reflectable=false, severity="survivable",
@@ -426,6 +440,8 @@ ThreatData.THREAT_PROFILE = {
         note="CONFLICT: KV disp=nil (none); Liquipedia notes stun is strong-dispellable, but authoritative KV is used so dispellable=none. | KV: magical, enemies..." },
     ["modifier_muerta_dead_shot"] = { school="magical", damage_type="magical", pierces_spell_immunity=false, dispellable="basic", delivery="projectile_line", primary_harm="damage", timing="at_impact", severity="survivable", add_kinds={"dispel_basic", "dispel_strong"},
         note="KV: magical, enemies_no (no pierce), disp=yes (basic), vector_targeting. Liquipedia: vector-targeted line trickshot (speed 2000) dealing 100-325 ma..." },
+    ["modifier_muerta_dead_shot_fear"] = { school="magical", damage_type="magical", pierces_spell_immunity=false, dispellable="basic", delivery="projectile_line", primary_harm="damage", timing="at_impact", severity="survivable", add_kinds={"dispel_basic", "dispel_strong"},
+        note="KV: magical, enemies_no (no pierce), disp=yes (basic), vector_targeting. Liquipedia: vector-targeted line trickshot (speed 2000) dealing 100-325 ma..." },  -- 2026-07-28: VPK-verified alias, the bare key above does not exist in any of the 664 paks
     ["modifier_naga_siren_song_of_the_siren"] = { school="magical", damage_type="none", pierces_spell_immunity=false, dispellable="none", delivery="spell", primary_harm="disable", timing="pre_cast", lotus_reflectable=false, severity="survivable",
         note="CONFLICT: KV disp=no (none); Liquipedia text says sleep is dispellable, but authoritative KV (dispellable=no) is used, so dispellable=none and no d..." },
     ["modifier_necrolyte_heartstopper_aura_effect"] = { school="magical", damage_type="magical", pierces_spell_immunity=true, dispellable="none", delivery="spell", primary_harm="damage", timing="reactive", lotus_reflectable=false, severity="survivable",
@@ -488,6 +504,8 @@ ThreatData.THREAT_PROFILE = {
         note="Escape Act / The Box (ringmaster_the_box, KV target_team={friendly}, dt=nil, si=enemies_no, disp=yes, beh=unit_target+ignore_backswing) is cast ONL..." },
     ["modifier_ringmaster_wheel"] = { school="magical", damage_type="magical", pierces_spell_immunity=false, dispellable="none", delivery="spell", positional=true, primary_harm="damage", timing="post_apply", lotus_reflectable=false, zone_outlasts_cyclone=true, severity="survivable",
         note="Wheel of Wonder (ringmaster_wheel, KV dt=magical, si=enemies_no, disp=no, beh=point+aoe): point-cast wheel rolls to a location then leaves a persis..." },
+    ["modifier_ringmaster_wheel_debuff"] = { school="magical", damage_type="magical", pierces_spell_immunity=false, dispellable="none", delivery="spell", positional=true, primary_harm="damage", timing="post_apply", lotus_reflectable=false, zone_outlasts_cyclone=true, severity="survivable",
+        note="Wheel of Wonder (ringmaster_wheel, KV dt=magical, si=enemies_no, disp=no, beh=point+aoe): point-cast wheel rolls to a location then leaves a persis..." },  -- 2026-07-28: VPK-verified alias (_debuff = the VICTIM-side name); bare key absent from all 664 paks
     ["modifier_rubick_fade_bolt_debuff"] = { school="magical", damage_type="magical", pierces_spell_immunity=false, dispellable="basic", delivery="spell", targeted=true, primary_harm="damage", timing="post_apply", severity="survivable",
         note="Fade Bolt (rubick_fade_bolt, KV dt=magical, si=enemies_no, disp=yes=basic, beh=unit_target): unit-targeted projectile that bounces between enemies,..." },
     ["modifier_rubick_telekinesis_stun"] = { school="magical", damage_type="none", pierces_spell_immunity=false, dispellable="strong", delivery="spell", targeted=true, primary_harm="disable", timing="pre_cast", severity="lethal",
@@ -502,6 +520,8 @@ ThreatData.THREAT_PROFILE = {
         note="Disruption (shadow_demon_disruption, KV dt=nil=none, si=enemies_no -> does NOT pierce, disp=no, beh=unit_target+dont_resume_attack): instant unit-t..." },
     ["modifier_shredder_chakram"] = { school="pure", damage_type="pure", pierces_spell_immunity=false, dispellable="none", delivery="projectile_line", primary_harm="damage", timing="at_impact", lotus_reflectable=false, severity="survivable",
         note="Pure damage (KV dt=pure) -> no magic_immune, no magic_barrier (decoupled magical branches do not fire). Not dispellable (disp=no) -> no dispel. Poi..." },
+    ["modifier_shredder_chakram_debuff"] = { school="pure", damage_type="pure", pierces_spell_immunity=false, dispellable="none", delivery="projectile_line", primary_harm="damage", timing="at_impact", lotus_reflectable=false, severity="survivable",
+        note="Pure damage (KV dt=pure) -> no magic_immune, no magic_barrier (decoupled magical branches do not fire). Not dispellable (disp=no) -> no dispel. Poi..." },  -- 2026-07-28: VPK-verified alias (_debuff = the VICTIM-side name); bare key absent from all 664 paks
     ["modifier_silencer_last_word"] = { school="magical", damage_type="magical", pierces_spell_immunity=false, dispellable="basic", delivery="spell", targeted=true, primary_harm="disable", timing="pre_cast", severity="survivable", add_kinds={"dispel_basic", "dispel_strong"},
         note="Unit-targeted magical disable (silence) with token damage -> primary_harm=disable, so magic_barrier correctly suppressed (gated on primary_harm==da..." },
     ["modifier_skeleton_king_reincarnate_slow"] = { school="magical", damage_type="none", pierces_spell_immunity=false, dispellable="basic", delivery="spell", primary_harm="disable", timing="post_apply", lotus_reflectable=false, severity="survivable",
@@ -560,6 +580,8 @@ ThreatData.THREAT_PROFILE = {
         note="Walrus Punch slow component, same mechanics as the air_time modifier. KV: enemies_yes => PIERCES BKB (no magic_immune; damage_type=nil=>none so no ..." },
     ["modifier_undying_decay"] = { school="magical", damage_type="magical", pierces_spell_immunity=false, dispellable="none", delivery="spell", primary_harm="damage", timing="pre_cast", lotus_reflectable=false, severity="survivable",
         note="KV: magical, enemies_no (does NOT pierce), dispellable=no. Instant point-target AoE => delivery=spell, targeted=false (AoE, not a single-unit refle..." },
+    ["modifier_undying_decay_debuff"] = { school="magical", damage_type="magical", pierces_spell_immunity=false, dispellable="none", delivery="spell", primary_harm="damage", timing="pre_cast", lotus_reflectable=false, severity="survivable",
+        note="KV: magical, enemies_no (does NOT pierce), dispellable=no. Instant point-target AoE => delivery=spell, targeted=false (AoE, not a single-unit refle..." },  -- 2026-07-28: VPK-verified alias (_debuff = the VICTIM-side name); bare key absent from all 664 paks
     ["modifier_vengefulspirit_nether_swap"] = { school="magical", damage_type="magical", pierces_spell_immunity=true, dispellable="basic", delivery="spell", targeted=true, primary_harm="displacement", timing="pre_cast", lotus_reflectable=false, severity="survivable",
         note="KV: magical, enemies_yes => PIERCES BKB, dispellable=yes=>basic. The dominant threat is the forced position swap (being teleported into the enemy t..." },
     ["modifier_vengefulspirit_retribution_tracker"] = { school="none", damage_type="none", pierces_spell_immunity=false, dispellable="none", delivery="spell", primary_harm="disable", timing="post_apply", lotus_reflectable=false, severity="survivable",
@@ -576,10 +598,16 @@ ThreatData.THREAT_PROFILE = {
         note="CONFLICT: none - KV magical/enemies_no/yes(basic) matches. Modeled at debuff layer (delivery=spell) rather than delivery=attack: the threat is the ..." },
     ["modifier_visage_grave_chill"] = { school="magical", damage_type="none", pierces_spell_immunity=false, dispellable="basic", delivery="spell", targeted=true, primary_harm="disable", timing="pre_cast", severity="survivable",
         note="CONFLICT: none - KV nil(damage_type=none)/enemies_no/yes(basic)/unit_target matches. dt=nil => school=magical (it is a magical spell) with damage_t..." },
+    ["modifier_visage_grave_chill_debuff"] = { school="magical", damage_type="none", pierces_spell_immunity=false, dispellable="basic", delivery="spell", targeted=true, primary_harm="disable", timing="pre_cast", severity="survivable",
+        note="CONFLICT: none - KV nil(damage_type=none)/enemies_no/yes(basic)/unit_target matches. dt=nil => school=magical (it is a magical spell) with damage_t..." },  -- 2026-07-28: VPK-verified alias (_debuff = the VICTIM-side name); bare key absent from all 664 paks
     ["modifier_void_spirit_aether_remnant"] = { school="magical", damage_type="magical", pierces_spell_immunity=false, dispellable="basic", delivery="spell", primary_harm="displacement", timing="pre_cast", lotus_reflectable=false, severity="survivable",
         note="CONFLICT: none - KV magical/enemies_no/yes(basic)/vector_targeting matches. pierces=false (the harmful pull does not pierce; only the True-Sight se..." },
+    ["modifier_void_spirit_aether_remnant_pull"] = { school="magical", damage_type="magical", pierces_spell_immunity=false, dispellable="basic", delivery="spell", primary_harm="displacement", timing="pre_cast", lotus_reflectable=false, severity="survivable",
+        note="CONFLICT: none - KV magical/enemies_no/yes(basic)/vector_targeting matches. pierces=false (the harmful pull does not pierce; only the True-Sight se..." },  -- 2026-07-28: VPK-verified alias, the bare key above does not exist in any of the 664 paks
     ["modifier_void_spirit_astral_step"] = { school="magical", damage_type="magical", pierces_spell_immunity=true, dispellable="none", delivery="spell", primary_harm="damage", timing="at_impact", lotus_reflectable=false, severity="survivable",
         note="CONFLICT: none - KV magical/enemies_YES(pierces)/nil(none) matches. si=enemies_yes => pierces_spell_immunity=true, so magic_immune correctly does N..." },
+    ["modifier_void_spirit_astral_step_debuff"] = { school="magical", damage_type="magical", pierces_spell_immunity=true, dispellable="none", delivery="spell", primary_harm="damage", timing="at_impact", lotus_reflectable=false, severity="survivable",
+        note="CONFLICT: none - KV magical/enemies_YES(pierces)/nil(none) matches. si=enemies_yes => pierces_spell_immunity=true, so magic_immune correctly does N..." },  -- 2026-07-28: VPK-verified alias (_debuff = the VICTIM-side name); bare key absent from all 664 paks
     ["modifier_weaver_swarm_debuff"] = { school="physical", damage_type="physical", pierces_spell_immunity=false, dispellable="none", delivery="projectile_line", primary_harm="damage", timing="at_impact", debuff_sticks_to_self=true, lotus_reflectable=false, severity="survivable", drop_kinds={"invuln", "displacement_perp", "displacement_far", "displacement_blink"},
         note="CONFLICT: none. KV physical / enemies_no / disp=no all consistent with Liquipedia (physical, no BKB pierce, undispellable). beh point+ignore_backsw..." },
     ["modifier_windrunner_shackleshot"] = { school="magical", damage_type="none", pierces_spell_immunity=false, dispellable="strong", delivery="projectile_homing", primary_harm="disable", timing="at_impact", lotus_reflectable=false, severity="survivable", add_kinds={"invuln", "dispel_strong"},
@@ -769,7 +797,8 @@ ThreatData.THREATS_ON_SELF = {
     -- on the armed-threat path (mars spear, rolling boulder).
     modifier_centaur_hoof_stomp                     = { role = "hard_disable", breaks_channel = true },  -- E3c sweep: KV stun 1.6-2.2s aoe
     modifier_earthshaker_fissure                    = { role = "hard_disable", breaks_channel = true },  -- E3c sweep: KV stun 1.0-1.6s line (instant, not dodgeable while channeling)
-    modifier_monkey_king_boundless_strike           = { role = "hard_disable", breaks_channel = true },  -- E3c sweep: KV stun 0.7-1.3s line
+    modifier_monkey_king_boundless_strike           = { role = "hard_disable", breaks_channel = true },
+    modifier_monkey_king_boundless_strike_stun           = { role = "hard_disable", breaks_channel = true },  -- 2026-07-28: VPK-verified alias, the bare key above does not exist in any of the 664 paks  -- E3c sweep: KV stun 0.7-1.3s line
     modifier_skeleton_king_hellfire_blast           = { role = "hard_disable", breaks_channel = true },  -- E3c sweep: KV stun 1.0-1.6s targeted (WK)
     modifier_snapfire_firesnap_cookie               = { role = "hard_disable", breaks_channel = true },  -- E3c sweep: KV impact stun 1.0-2.2s
     modifier_primal_beast_rock_throw                = { role = "hard_disable", breaks_channel = true },  -- E3c sweep: KV stun 1.4s
@@ -953,6 +982,48 @@ ThreatData.THREATS_ON_SELF = {
     modifier_viper_poison_attack_slow           = { role = "kiting_slow",      save = "bkb_or_dispel"  },  -- harvested 2026-05-20: Viper Q applied via auto, slow + DOT
     modifier_necrolyte_heartstopper_aura_effect = { role = "aura_dot",         save = "informational"  },  -- harvested 2026-05-20: %-max-HP aura DOT; counter is move out of range (~1500u)
     modifier_vengefulspirit_retribution_tracker = { role = "tracker",          save = "informational"  },  -- harvested 2026-05-20: VS shard/talent tracker; no direct threat
+
+    -- 2026-07-27 g356 RUNTIME HARVEST. These are the names the ENGINE reported through
+    -- threat_unrecognized in a live match, and two of them DISAGREE with the spellings already
+    -- in this table - which means those entries have NEVER MATCHED and the threats were
+    -- invisible. Both spellings are kept: a dead key costs nothing, a missing key is a real miss.
+    --
+    -- DROW. The table carried modifier_drow_ranger_wave_of_silence; the engine (and the VPK)
+    -- say modifier_drowranger_wave_of_silence, with the knockback split into its own modifier.
+    -- The old entry was role="delayed_aoe" i.e. knockback-only, which UNDERSTATED it badly:
+    -- Liquipedia has Gust silencing 3/4/5/6s (knockback 0.4-0.9s), and a 6s silence on Tinker
+    -- means no Rearm and no March. Classified as the silence it is, matching death_prophet.
+    modifier_drowranger_wave_of_silence           = { role = "silence_on_me", save = "bkb_or_dispel", breaks_channel = true },
+    modifier_drowranger_wave_of_silence_knockback = { role = "delayed_aoe",   save = "informational", breaks_channel = true },
+    -- DEATH PROPHET. Engine says modifier_deathprophet_silence_debuff. The VPK on disk still
+    -- carries only modifier_death_prophet_silence, so the VPK is STALE here and the live name
+    -- wins - worth remembering the next time a VPK grep contradicts a real log.
+    modifier_deathprophet_silence_debuff          = { role = "silence_on_me", save = "bkb_or_dispel" },
+    -- The rest are NOT threats to us. They are classified only so they stop being reported as
+    -- unrecognized: Weave is Dazzle's innate armor swing, the arcane bolt lifesteal is a buff on
+    -- SKYWRATH rather than a debuff on us, and the degen aura is a small movement-speed slow.
+    modifier_omniknight_degen_aura_effect         = { role = "aura_slow",     save = "informational" },
+    modifier_dazzle_innate_weave_armor            = { role = "aux",           save = "informational" },
+    modifier_dazzle_innate_weave_armor_counter    = { role = "aux",           save = "informational" },
+    modifier_skywrath_mage_arcane_bolt_lifesteal  = { role = "aux",           save = "informational" },
+
+    -- 2026-07-28 g357 runtime harvest. Same source of truth as the g356 batch: names the ENGINE
+    -- reported through threat_unrecognized. All three are minor - two recoverable slows and a
+    -- vision marker - so they are classified only to stop the noise, not because they threaten us.
+    -- `modifier_truesight` is worth noting as a specimen of the GENERIC class (no hero prefix at
+    -- all), the same family as modifier_stunned / _rooted / _silence that no per-ability rename
+    -- can ever reach. See THREAT_DEAD_KEY_AUDIT.txt.
+    modifier_lich_frostnova_slow                  = { role = "kiting_slow",  save = "informational" },
+    modifier_zuus_static_field_slow               = { role = "kiting_slow",  save = "informational" },
+    modifier_truesight                            = { role = "aux",          save = "informational" },
+
+    -- 2026-07-28 demo-2 harvest. Only one of the two matters, and it PROVED THE METHOD:
+    -- `modifier_visage_grave_chill_debuff` is handled above as a VPK alias, and this demo caught
+    -- the engine emitting exactly that name - the first runtime confirmation that the `_debuff`
+    -- suffix is the VICTIM-side marker. The first suffix whitelist omitted `_debuff` and so
+    -- rejected Grave Chill (a HARD DISABLE) as unfixable; six more aliases came back once it was
+    -- added. Keep `_debuff` in mind before trusting any future suffix filter.
+    modifier_beastmaster_axe_stack_counter        = { role = "aux",          save = "informational" },
 }
 
 ----------------------------------------------------------------------------

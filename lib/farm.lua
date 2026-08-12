@@ -56,23 +56,6 @@ local function _sum_hp(units)
     return s
 end
 
----Count units a line nuke fired from `origin` along unit-vector `aim_dir`
----would hit. Public wrapper around the scalar helper.
----@param origin userdata Vector cast origin
----@param aim_dir userdata Vector UNIT direction (caller normalizes)
----@param length number line length
----@param half_width number half the line width
----@param units table unit list (see contract)
----@return integer count
----@return table hits
-function Farm.CountInLine(origin, aim_dir, length, half_width, units)
-    if not (origin and aim_dir and length and half_width and units) then
-        return 0, {}
-    end
-    return _count_in_line(origin.x, origin.y, aim_dir.x, aim_dir.y,
-                          length, half_width, units)
-end
-
 ---Find the line-nuke aim that hits the most units. Candidate directions are
 ---taken toward each unit (a line nuke's optimum always points at some unit's
 ---bearing). Ties broken by greater summed hp, then by a nearer cluster
@@ -219,81 +202,6 @@ function Farm.WorthCasting(hit_count, min_count)
     return (hit_count or 0) >= (min_count or 1)
 end
 
----Two-camp stand search: ordered candidate stand spots for clearing an ADJACENT
----camp PAIR with ONE March. Pure scalar math (only Vector(x,y,z) for the returned
----points), so it is offline-testable; the hero applies walkability + enemy risk to
----the ordered list and takes the first that passes.
----
----March coverage is a rectangle CENTRED on the cast point, oriented along the hero's
----facing (from the stand toward the cast). Casting at (near) the midpoint of the two
----camps keeps both within +/- march_len/2 longitudinally. Standing off the A->B axis
----by a perpendicular `lat` offset finds walkable ground when the on-axis midpoint
----stand lands on terrain (the river pairs), at the cost of TILTING the rectangle: the
----farther camp then sits far_long*sin(theta) off the tilted centreline, so candidates
----whose tilt pushes it past the half-width are dropped (coverage lost).
----
----Candidates are emitted for each back distance (along -D toward the stand) x lateral
----offset, in the given order (least-tilt first within each back), keeping only those
----that (1) stay within March cast range of the cast point and (2) still cover both
----camps. Each lateral offset is clamped to the in-cast-range circle (back^2+lat^2 <=
----(cast_range-range_pad)^2). Returns {} when the pair is too far apart to cover
----longitudinally (d/2+|pair_offset| > march_len/2) or the inputs are degenerate.
----@param A table camp-center Vector A (reads .x/.y/.z)
----@param B table partner camp-center Vector B
----@param opts table|nil { cast_range?, range_pad?, halfwidth?, march_len?, stand_ring?, pair_offset?, backs?, lats? }
----@return table candidates ordered { stand=Vector, aim=Vector, back=number, lat=number, tilt=number }
-function Farm.PairStandCandidates(A, B, opts)
-    if not (A and B) then return {} end
-    opts = opts or {}
-    local cast_range = opts.cast_range or 300
-    local range_pad  = opts.range_pad  or 20
-    local halfwidth  = opts.halfwidth  or 450
-    local march_len  = opts.march_len  or 1800
-    local stand_ring = opts.stand_ring or 250
-    local off        = opts.pair_offset or 0
-    local backs      = opts.backs or { stand_ring, 180, 130 }
-    local lats       = opts.lats  or { 0, 110, -110, 220, -220 }
-    local half       = march_len * 0.5
-    local rmax       = cast_range - range_pad
-
-    local dx, dy = B.x - A.x, B.y - A.y
-    local d = math.sqrt(dx * dx + dy * dy)
-    if d < 1 then return {} end                          -- degenerate / coincident
-    local far_long = d * 0.5 + math.abs(off)             -- longitudinal dist of the farther camp from the cast
-    if far_long > half then return {} end                -- cannot cover both even on-axis
-
-    local ux, uy = dx / d, dy / d                        -- D = unit(B-A)
-    local perpx, perpy = -uy, ux                         -- perpendicular to D
-    local castx = (A.x + B.x) * 0.5 + ux * off
-    local casty = (A.y + B.y) * 0.5 + uy * off
-    local z = A.z or 0
-
-    local out = {}
-    for bi = 1, #backs do
-        local back = backs[bi]
-        local maxlat2 = rmax * rmax - back * back         -- in-range circle: back^2 + lat^2 <= rmax^2
-        if maxlat2 > 0 then
-            local maxlat = math.sqrt(maxlat2)
-            for li = 1, #lats do
-                local lat = lats[li]
-                if lat > maxlat then lat = maxlat elseif lat < -maxlat then lat = -maxlat end
-                local hyp = math.sqrt(back * back + lat * lat)
-                local sintheta = (hyp > 0) and (math.abs(lat) / hyp) or 0
-                local tilt = far_long * sintheta          -- far-camp offset from the tilted centreline
-                if tilt <= halfwidth then
-                    out[#out + 1] = {
-                        stand = Vector(castx - ux * back + perpx * lat,
-                                       casty - uy * back + perpy * lat, z),
-                        aim   = Vector(castx, casty, z),
-                        back  = back, lat = lat, tilt = tilt,
-                    }
-                end
-            end
-        end
-    end
-    return out
-end
-
 ---Tight-pair clear classification ("best distance" model): given the inter-camp
 ---distance `d`, how well does one centred March (cast at ~the midpoint) clear BOTH
 ---camps? Models each camp as a creep disc of radius `disc` centred d/2 from the cast.
@@ -367,15 +275,65 @@ function Farm.GreedyPairs(points, pair_max, min_sep, allow)
     return groups
 end
 
+--- Observed-farmer camp clearing (v0.1.332, TINKER_CAMP_FARMER_CLEAR_DESIGN.md,
+--- sustained per-hero dwell AMENDMENT v0.1.349): ONE hero present inside `radius`
+--- of a camp centre CONTINUOUSLY for `min_dwell` seconds is FARMING it - the camp
+--- is as good as cleared until the next xx:00. `window` is only the max GAP that
+--- keeps that hero's sighting RUN unbroken; on its own it does NOT mean farming.
+--- BOTH halves are load-bearing, and each killed a real false mark:
+---   * without min_dwell, a hero CROSSING the circle (1200u at radius 600, ~4s at
+---     300 MS) trips a 2-sighting test - 14 live camps retired that way in g349;
+---   * without per-hero runs, a RELAY of crossers does the same thing between
+---     them (A inside [0,4] hands off to B inside [2,6] = a 6s "dwell" nobody
+---     served), which is routine traffic on path-adjacent camps.
+--- Identity comes from h.id or h.e (the caller's entity); the run restarts when
+--- the owner changes, and a hero already owning the run keeps it against any
+--- passer-by. Confirming RETIRES the run, so no latch survives to go stale across
+--- the camp's respawn (the caller has already retired the camp itself).
+--- Pure: the caller supplies positions ({x=,y=,id=/e=}), camps ({key=,cx=,cy=}),
+--- the persistent dwell table (key -> {who,first,last}), and the clock via opts.now.
+--- Returns the camp keys confirmed farmed by THIS call.
+function Farm.ObservedFarmers(hero_pts, camps, dwell, opts)
+    local r = (opts and opts.radius) or 600
+    local r2 = r * r
+    local gap = (opts and opts.window) or 4.0
+    local need = (opts and opts.min_dwell) or 6.0
+    local t = (opts and opts.now) or 0
+    local marks = {}
+    for _, c in ipairs(camps) do
+        local d = dwell[c.key]
+        local who = nil                             -- a hero inside, PREFERRING the one who owns the open run
+        for _, h in ipairs(hero_pts) do
+            local dx, dy = h.x - c.cx, h.y - c.cy   -- component math: camp centres are plain tables
+            if dx * dx + dy * dy <= r2 then
+                local id = h.id or h.e or h
+                if d and d.who == id then who = id; break end   -- the resident is still here
+                if who == nil then who = id end                 -- else the first newcomer opens a run
+            end
+        end
+        if who ~= nil then
+            local dt = d and (t - d.last)
+            if d and d.who == who and dt > 0 and dt <= gap then  -- SAME hero, run unbroken
+                d.last = t
+                if (t - d.first) >= need then
+                    marks[#marks + 1] = c.key
+                    dwell[c.key] = nil              -- confirmed: retire the run, never latch it
+                end
+            else                                    -- new owner, or continuity broken (incl. dt <= 0)
+                dwell[c.key] = { who = who, first = t, last = t }
+            end
+        end
+    end
+    return marks
+end
+
 -- Tinker farm: valuation / clear-feasibility / scoring / ally-respect helpers.
 -- Hero-agnostic and PURE: the hero precomputes per-creep hp (Entity.GetHealth),
 -- gold (NPC.GetGoldBountyMax), and ally values (lib/hero_value), passing plain
 -- tables/numbers in. No engine calls here. See Tinker/TINKER_FARM_DESIGN.md.
 -- Creep-list contract: { { hp = <number?>, gold = <number?> }, ... }
 
-Farm.DEFAULT_RISK_WEIGHT    = 4.0   -- gold/sec penalty per unit of risk (0..1)
 Farm.DEFAULT_CONTEST_RADIUS = 700   -- an allied core this close "owns" the spot
-local FARM_TIME_EPS = 0.5           -- floor on time-to-acquire (avoid div-by-zero)
 
 ---Sum precomputed gold over a creep list. Missing gold counts as 0. (R4 input)
 ---@param creeps table|nil
@@ -415,16 +373,6 @@ function Farm.EffectiveHP(creeps)
     return h
 end
 
----Can the hero clear these creeps with the given damage budget? The hero
----computes damage_budget (e.g. March damage-per-cast from lib/ability_data
----times the planned casts for this camp type). (R3)
----@param creeps table|nil
----@param damage_budget number|nil
----@return boolean
-function Farm.CanClear(creeps, damage_budget)
-    return Farm.EffectiveHP(creeps) <= (damage_budget or 0)
-end
-
 ---Marches needed to clear a camp, stack-aware. `base` is the validated per-tier
 ---count (caller's marches_for + clip); `ehp` is the live effective HP of the camp
 ---(stacks included); `per_cast_dmg` is one March's effective damage. Returns
@@ -443,38 +391,38 @@ function Farm.ClearBudget(base, ehp, per_cast_dmg)
     return (need > base) and need or base
 end
 
----Value score for one farm candidate; higher is better. The hero supplies an
----estimated time-to-acquire (travel + clear seconds; Keen TP shrinks travel)
----and an optional risk in 0..1 from the safety layer. (R4)
----@param opts table|nil { gold=number, time=number, risk=number?, risk_weight=number? }
----@return number
-function Farm.ScoreTarget(opts)
-    if not opts then return 0 end
-    local gold = opts.gold or 0
-    local time = opts.time or 0
-    local risk = opts.risk or 0
-    local rw   = opts.risk_weight or Farm.DEFAULT_RISK_WEIGHT
-    if time < FARM_TIME_EPS then time = FARM_TIME_EPS end
-    return gold / time - risk * rw
-end
-
 ---Is `pos` contested by an allied core, so the farm bot should not steal it?
 ---The hero passes allies with PRECOMPUTED value (from lib/hero_value); this lib
 ---never calls hero_value, staying pure. (R2)
+---v0.1.333 (jungle-aware lane contest): with opts.camps, an ally FARMING the
+---jungle beside `pos` (within camp_r of a camp centre AND within jungle_r of
+---`pos`) also contests. The second return names the branch for verdict logging.
+---No camps opt = the pre-.333 semantics exactly.
 ---@param pos table|nil { x, y }
 ---@param allies table|nil { { pos = {x,y}, value = number }, ... }
----@param opts table|nil { radius=number?, min_value=number? }
----@return boolean
+---@param opts table|nil { radius=number?, min_value=number?, camps={ {x,y}, ... }?, camp_r=number?, jungle_r=number? }
+---@return boolean contested
+---@return string|nil branch "wave" | "jungle"
 function Farm.IsContestedByAlly(pos, allies, opts)
     if not (pos and allies) then return false end
     local radius = (opts and opts.radius) or Farm.DEFAULT_CONTEST_RADIUS
     local minval = (opts and opts.min_value) or 0
-    local r2 = radius * radius
+    local camps = opts and opts.camps
+    local camp_r = (opts and opts.camp_r) or 600
+    local jungle_r = (opts and opts.jungle_r) or 2600
+    local r2, c2, j2 = radius * radius, camp_r * camp_r, jungle_r * jungle_r
     for i = 1, #allies do
         local a = allies[i]
         if a and a.pos and (a.value or 0) >= minval then
             local dx, dy = a.pos.x - pos.x, a.pos.y - pos.y
-            if (dx * dx + dy * dy) <= r2 then return true end
+            local d2 = dx * dx + dy * dy
+            if d2 <= r2 then return true, "wave" end
+            if camps and d2 <= j2 then
+                for k = 1, #camps do
+                    local cx, cy = a.pos.x - camps[k].x, a.pos.y - camps[k].y
+                    if cx * cx + cy * cy <= c2 then return true, "jungle" end
+                end
+            end
         end
     end
     return false
@@ -514,19 +462,6 @@ function Farm.StructuralRisk(pos, opts)
     return r
 end
 
----TOWER-LINE depth risk for a lane stand: 0 on our side of mid (depth <= 0); ramps linearly to
----`at_line` at the enemy defensive line (`line_depth` = the enemy T1's depth past mid, same signed
----units as `depth`); escalates past the line at `past_rate` per `line_depth`, capped at 1. Captures
----"the deeper into enemy territory, the riskier", anchored on the tower line. Pure.
----@param depth number signed units past mid toward the enemy (<=0 = our side)
----@param line_depth number the enemy T1 line's depth past mid (>0)
-function Farm.DepthLineRisk(depth, line_depth, at_line, past_rate)
-    if (depth or 0) <= 0 or (line_depth or 0) <= 0 then return 0 end
-    local r = depth / line_depth                         -- 0 at mid, 1 at the enemy T1 line
-    if r <= 1 then return r * (at_line or 0.5) end
-    return math.min(1, (at_line or 0.5) + (r - 1) * (past_rate or at_line or 0.5))
-end
-
 ---Aim point that best covers a creep cluster along a lane axis: the MEAN point
 ---shifted along the (already-unit) axis (ax, ay) to the projection-span midpoint, so
 ---an AoE footprint spans front (melee) to back (ranged) instead of sitting on the
@@ -549,36 +484,21 @@ function Farm.WaveAimCenter(points, ax, ay)
     return { x = mx + ax * shift, y = my + ay * shift }
 end
 
----Deep-farm relax factor: scale the structural depth penalty DOWN when the enemy
----team is accounted for. Returns `relax` when missing <= safe_missing, else 1.0.
----PURE. Caller multiplies StructuralRisk's half_weight (and zone bumps) by it.
----@param missing number   enemies currently fogged (Escape.MissingCount)
----@param safe_missing number|nil  default 1
----@param relax number|nil   default 0.4
----@return number
-function Farm.DeepFarmFactor(missing, safe_missing, relax)
-    local sm = safe_missing or 1
-    if (missing or 0) <= sm then return relax or 0.4 end
-    return 1.0
-end
-
 -- ------------------------------- shove (crash-push cast geometry) -------------------------------
 -- Condensed from lib/shove.lua (2026-07-01, user call: libs are cohesive domain units like C's
 -- math.h - a 1-function lib is an artifact, not a library). Same function, same tests.
 
 ---pure geometry for the crash-push March. stand = the enemy-wave centroid offset back toward the
----fountain by `standback` (matches update_wave_spot); `perp` = the unit vector PERPENDICULAR to the
----creep line (the hero offsets the multi-W casts along it so the robot sweep crosses the creep line
----for max hits); cast_point = a point `cast_ahead` from the stand toward the centroid (the base aim,
----before the hero applies the +/- perp offset). Degenerate dir -> perp {0,0}, cast at the centroid.
+---fountain by `standback` (matches update_wave_spot).
+---`creep_line_dir` is vestigial: it fed the `perp` / `cast_point` outputs, which no hero ever read
+---(dropped with them). Kept in the signature so the one call site and its tests stay untouched.
 ---@param clash_centroid table {x,y}
----@param creep_line_dir table {x,y}  the direction the creep line runs (need not be normalized)
----@param opts table|nil { standback?, cast_ahead?, fountain? }
----@return table { stand{x,y}, cast_point{x,y}, perp{x,y} }
+---@param creep_line_dir table|nil  unused
+---@param opts table|nil { standback?, fountain? }
+---@return table { stand{x,y} }
 function Farm.CrashCast(clash_centroid, creep_line_dir, opts)
     opts = opts or {}
     local standback = opts.standback or 900
-    local cast_ahead = opts.cast_ahead or 280
     local c = clash_centroid
 
     local stand = { x = c.x, y = c.y }
@@ -592,17 +512,7 @@ function Farm.CrashCast(clash_centroid, creep_line_dir, opts)
         end
     end
 
-    local lx, ly = (creep_line_dir and creep_line_dir.x) or 0, (creep_line_dir and creep_line_dir.y) or 0
-    local ll = math.sqrt(lx * lx + ly * ly)
-    local perp = (ll >= 1e-6) and { x = -ly / ll, y = lx / ll } or { x = 0, y = 0 }
-
-    local sx, sy = c.x - stand.x, c.y - stand.y
-    local sl = math.sqrt(sx * sx + sy * sy)
-    local cast_point
-    if sl < 1 then cast_point = { x = c.x, y = c.y }
-    else cast_point = { x = stand.x + sx / sl * cast_ahead, y = stand.y + sy / sl * cast_ahead } end
-
-    return { stand = stand, cast_point = cast_point, perp = perp }
+    return { stand = stand }
 end
 
 -- ------------------------------- farm_decide (stand predicates) ---------------------------------
@@ -626,57 +536,6 @@ function Farm.OutsideTowerRange(pos, towers, range, margin)
         if dx * dx + dy * dy < r * r then return false end
     end
     return true
-end
-
--- ------------------------------- neutral camps + stacking + dps clear ---------------------------
--- Future-hero additions (2026-07-01, user call: the more a lib gives, the better). Liquipedia-
--- verified REPRESENTATIVE camp per tier (fetched: Kobold / Mud Golem / Hellbear Smasher / Ancient
--- Black Dragon). Real camps vary per family (e.g. golems carry 30% MR while centaurs/wolves are 0;
--- troll camps add summons) - live reads override when visible, consumers calibrate. n * hp
--- approximates the tier's camp total (cross-checked vs the in-client-validated TIER_EST).
-
-Farm.NEUTRAL_STATS = {
-    [0] = { n = 5, hp = 240,  armor = 0, mr = 0,    dmg = 15.5, atk = 2, rep = "kobold" },
-    [1] = { n = 3, hp = 750,  armor = 0, mr = 0.30, dmg = 25,   atk = 2, rep = "mud_golem" },
-    [2] = { n = 2, hp = 950,  armor = 4, mr = 0,    dmg = 52,   atk = 2, rep = "hellbear_smasher" },
-    [3] = { n = 2, hp = 2000, armor = 4, mr = 0.30, dmg = 65,   atk = 2, rep = "ancient_black_dragon" },
-}
-
----combat records for a REPRESENTATIVE camp of `tier` (0..3), SimFight-ready ({hp,dmg,atk,armor,
----atype}; mr carried as info for magic-damage consumers - the physical sim ignores it). Feeds
----Lane.SimFight for camp-vs-camp / camp-vs-hero attrition checks ("can this hero farm this camp").
-function Farm.CampCombatants(tier)
-    local s = Farm.NEUTRAL_STATS[tier] or Farm.NEUTRAL_STATS[1]
-    local out = {}
-    for i = 1, s.n do
-        out[i] = { hp = s.hp, dmg = s.dmg, atk = s.atk, armor = s.armor, atype = "basic", mr = s.mr }
-    end
-    return out
-end
-
----auto-attack clear time: the right-click counterpart of ClearBudget (cast-based). Armor formula
----per Liquipedia (Armor page): factor = 1 - 0.06*armor/(1 + 0.06*|armor|). Pure.
----@return number seconds (math.huge when dps is missing/zero)
-function Farm.ClearTimeDPS(ehp, dps, armor)
-    if not dps or dps <= 0 then return math.huge end
-    local a = armor or 0
-    local mult = 1 - (0.06 * a) / (1 + 0.06 * math.abs(a))
-    return (ehp or 0) / (dps * mult)
-end
-
----next stack pull window. Camps respawn at each :00 when the spawn box is EMPTY (Liquipedia Creep
----Stacking); the standard pull is ~:54-:55, varying per camp/hero -> `pull_lead` is the calibration
----knob (6 = :54; far/ranged camps want more, e.g. the dire top-T2 medium needs ~:56 -> lead 4...
----the CONSUMER tunes per camp). Pure grid math, always strictly future.
----@return table { pull_at, spawn_at } absolute times on the game clock
-function Farm.StackWindow(game_time, pull_lead, period)
-    period = period or 60
-    local lead = pull_lead or 6
-    local t = game_time or 0
-    local spawn_at = (math.floor(t / period) + 1) * period
-    local pull_at = spawn_at - lead
-    if pull_at <= t then spawn_at = spawn_at + period; pull_at = spawn_at - lead end
-    return { pull_at = pull_at, spawn_at = spawn_at }
 end
 
 -- ------------------------------- route risk ------------------------------------------------------

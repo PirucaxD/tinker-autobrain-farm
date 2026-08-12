@@ -287,12 +287,6 @@ describe("lib/farm , pure geometry (v0.5.82)", function()
         assert_false(Farm.WorthCasting(0, 1))
     end)
 
-    it("CountInLine counts units inside the line band", function()
-        local units = { u(100, 0), u(500, 50), u(500, 300), u(-100, 0), u(1200, 0) }
-        local n = Farm.CountInLine(origin, { x = 1, y = 0, z = 0 }, 1000, 100, units)
-        assert_eq(n, 2, "expected 2 in-line")
-    end)
-
     it("BestLineAim picks the densest direction", function()
         local units = { u(200, 0), u(400, 0), u(600, 0), u(0, 400) }
         local aim, hit = Farm.BestLineAim(origin, units, 1075, 110)
@@ -379,90 +373,6 @@ describe("lib/farm -- BestLineAim hero-clip bonus (v0.5.111)", function()
         assert_eq(hit, 2)
         assert_eq(bn, 0)
         assert_true(aim.y > aim.x, "creep line wins; hero-only bearing is not wave-clear")
-    end)
-end)
-
-describe("lib/farm -- PairStandCandidates (Tinker two-camp stand search, task A)", function()
-    -- Deterministic opts so counts/order don't depend on lib defaults. rmax = 280.
-    local OPTS = { cast_range = 300, range_pad = 20, halfwidth = 450,
-                   march_len = 1800, backs = { 250, 180, 130 },
-                   lats = { 0, 110, -110, 220, -220 } }
-    local function V(x, y, z) return { x = x, y = y, z = z or 0 } end
-    local function distxy(a, b) local dx, dy = a.x - b.x, a.y - b.y; return math.sqrt(dx * dx + dy * dy) end
-
-    it("primary candidate is the zero-tilt on-axis midpoint stand", function()
-        local cs = Farm.PairStandCandidates(V(0, 0, 0), V(1000, 0, 0), OPTS)
-        assert_true(#cs > 0, "expected candidates")
-        local c = cs[1]
-        assert_true(math.abs(c.aim.x - 500) < 1e-6 and math.abs(c.aim.y) < 1e-6, "cast at the midpoint")
-        assert_true(math.abs(c.stand.x - 250) < 1e-6 and math.abs(c.stand.y) < 1e-6, "stand STAND_RING back on the axis")
-        assert_true(math.abs(c.lat) < 1e-6, "primary lat=0 (no tilt)")
-    end)
-
-    it("every candidate is within March cast range of its cast point", function()
-        local cs = Farm.PairStandCandidates(V(0, 0, 0), V(1000, 0, 0), OPTS)
-        for _, c in ipairs(cs) do
-            assert_true(distxy(c.stand, c.aim) <= 280 + 1e-6,
-                "stand within rmax of cast, got " .. distxy(c.stand, c.aim))
-        end
-    end)
-
-    it("lateral offsets fall on BOTH perpendicular sides", function()
-        local cs = Farm.PairStandCandidates(V(0, 0, 0), V(1000, 0, 0), OPTS)
-        local pos, neg = false, false
-        for _, c in ipairs(cs) do
-            if c.lat > 1 then pos = true elseif c.lat < -1 then neg = true end
-        end
-        assert_true(pos and neg, "candidates on both sides of the A->B axis")
-    end)
-
-    it("a tight pair drops the high-tilt candidates that lose far-camp coverage", function()
-        local loose = Farm.PairStandCandidates(V(0, 0, 0), V(1000, 0, 0), OPTS)   -- d=1000
-        local tight = Farm.PairStandCandidates(V(0, 0, 0), V(1780, 0, 0), OPTS)   -- d=1780
-        assert_eq(#loose, 15, "loose pair: the full back x lat grid keeps coverage")
-        assert_eq(#tight, 7, "tight pair: only the low-tilt candidates keep both camps covered")
-        for _, c in ipairs(tight) do
-            assert_true(c.tilt <= 450 + 1e-6, "every kept candidate holds the far camp within half-width")
-        end
-    end)
-
-    it("diagonal pair: a lateral candidate uses the true perpendicular", function()
-        local cs = Farm.PairStandCandidates(V(0, 0, 0), V(1000, 1000, 0),
-            { cast_range = 300, range_pad = 20, halfwidth = 450, march_len = 1600,
-              backs = { 250 }, lats = { 0, 100 } })
-        local c = cs[2]   -- back=250 lat=100 on the 45-degree axis
-        assert_true(math.abs(c.stand.x - 252.513) < 0.1, "stand.x off the perpendicular, got " .. tostring(c.stand.x))
-        assert_true(math.abs(c.stand.y - 393.934) < 0.1, "stand.y off the perpendicular, got " .. tostring(c.stand.y))
-    end)
-
-    it("pair too far to cover longitudinally -> no candidates", function()
-        local cs = Farm.PairStandCandidates(V(0, 0, 0), V(2000, 0, 0), OPTS)   -- d/2=1000 > half=900
-        assert_eq(#cs, 0, "infeasible pair returns empty")
-    end)
-
-    it("degenerate (coincident camps) -> no candidates, no crash", function()
-        local cs = Farm.PairStandCandidates(V(100, 100, 0), V(100, 100, 0), OPTS)
-        assert_eq(#cs, 0)
-    end)
-
-    it("respects an along-axis pair_offset (cast shifts toward the far camp)", function()
-        local cs = Farm.PairStandCandidates(V(0, 0, 0), V(1000, 0, 0),
-            { cast_range = 300, range_pad = 20, halfwidth = 450, march_len = 1800,
-              backs = { 250 }, lats = { 0 }, pair_offset = 150 })
-        assert_eq(#cs, 1)
-        assert_true(math.abs(cs[1].aim.x - 650) < 1e-6, "cast = midpoint + offset along the axis")
-        assert_true(math.abs(cs[1].stand.x - 400) < 1e-6, "stand = cast - STAND_RING along the axis")
-    end)
-
-    it("offset feasibility boundary: a nonzero pair_offset shrinks the coverable distance", function()
-        -- far_long = d/2 + |off|; feasible iff far_long <= march_len/2 (=900). The hero's
-        -- partner-accept gate must track THIS (off=0 -> <=1800; off=150 -> <=1500), else it
-        -- accepts partners the lib always rejects (silent never-pairs). (COR-A3 guard)
-        local function n(d) return #Farm.PairStandCandidates(V(0, 0, 0), V(d, 0, 0),
-            { cast_range = 300, range_pad = 20, halfwidth = 450, march_len = 1800,
-              backs = { 250 }, lats = { 0 }, pair_offset = 150 }) end
-        assert_true(n(1500) >= 1, "d=1500 off=150 is coverable (far_long=900=half)")
-        assert_eq(n(1650), 0, "d=1650 off=150 exceeds coverage (far_long=975>900)")
     end)
 end)
 
@@ -558,37 +468,6 @@ describe("lib/farm -- WaveAimCenter (ranged-creep coverage)", function()
     end)
 end)
 
-describe("lib/farm -- DeepFarmFactor (F3 missing-enemy gate)", function()
-    it("missing <= safe -> relax", function()
-        assert_eq(Farm.DeepFarmFactor(0, 1, 0.8), 0.8)
-        assert_eq(Farm.DeepFarmFactor(1, 1, 0.8), 0.8)
-    end)
-    it("missing > safe -> 1.0 (full veto)", function()
-        assert_eq(Farm.DeepFarmFactor(2, 1, 0.8), 1.0)
-    end)
-    it("defaults (safe=1, relax=0.4) when omitted", function()
-        assert_eq(Farm.DeepFarmFactor(1), 0.4); assert_eq(Farm.DeepFarmFactor(2), 1.0)
-    end)
-end)
-
-describe("lib/farm -- DepthLineRisk (review #2 tower-line depth risk)", function()
-    it("0 on our side of mid (depth <= 0)", function()
-        assert_eq(Farm.DepthLineRisk(-500, 2000, 0.5, 0.5), 0)
-        assert_eq(Farm.DepthLineRisk(0, 2000, 0.5, 0.5), 0)
-    end)
-    it("ramps linearly to at_line at the enemy T1 line", function()
-        assert_true(math.abs(Farm.DepthLineRisk(1000, 2000, 0.5, 0.5) - 0.25) < 1e-9, "half-way = at_line/2")
-        assert_true(math.abs(Farm.DepthLineRisk(2000, 2000, 0.5, 0.5) - 0.5) < 1e-9, "at the line = at_line")
-    end)
-    it("escalates past the line, capped at 1", function()
-        assert_true(math.abs(Farm.DepthLineRisk(3000, 2000, 0.5, 0.5) - 0.75) < 1e-9, "one line past = at_line + past_rate")
-        assert_eq(Farm.DepthLineRisk(9000, 2000, 0.5, 0.5), 1, "far past the line caps at 1")
-    end)
-    it("no line_depth -> 0 (no anchor)", function()
-        assert_eq(Farm.DepthLineRisk(1000, 0, 0.5, 0.5), 0)
-    end)
-end)
-
 describe("lib/farm -- PathRisk (route-risk sampler for laning)", function()
     -- risk_at: a hot zone around x=1000 (danger corridor) that safe endpoints miss.
     local function risk_at(p) return (math.abs(p.x - 1000) < 250) and 0.9 or 0.0 end
@@ -677,6 +556,32 @@ describe("lib/nav -- Stuck (progress supervision)", function()
         local st
         tr, st = Nav.Stuck(tr, 1400, 3.5)
         assert_true(st)
+    end)
+    it("the WALL-CLOCK gap: an untouched track charges time nobody observed", function()
+        -- v0.1.355, the shape of the bug this pins. Stuck compares t - best_t; it cannot tell
+        -- "the hero stood still for 3.1s" from "nobody called me for 3.1s". Tinker's tick()
+        -- returns on is_channeling ABOVE the FSM dispatch, so a Rearm L1 channel (3.09s) is
+        -- exactly such a gap, and the first call after it reported stuck -> a LIVE camp got
+        -- retired until respawn. This is CORRECT lib behaviour, deliberately pinned: the fix
+        -- belongs at the caller, and anyone changing Stuck to time-out differently must see
+        -- this test and read TINKER_CHANNEL_WATCHDOG_DESIGN.md first.
+        local tr = select(1, Nav.Stuck(nil, 5000, 100.0))
+        local st
+        tr, st = Nav.Stuck(tr, 5000, 103.1)                 -- one call, 3.1s later, unmoved
+        assert_true(st, "a single post-gap call must report stuck on the full elapsed span")
+    end)
+    it("clearing the track to nil re-baselines, however far the clock has run", function()
+        -- The property the v0.1.355 fix rests on: the tick() channel guard sets
+        -- State.moveTrack = nil every tick it holds orders, so the next no_progress call
+        -- starts a FULL fresh NO_PROGRESS_S window instead of inheriting the channel.
+        local _, st = Nav.Stuck(nil, 5000, 103.1)           -- same instant as the case above
+        assert_true(not st, "a nil track must never report stuck on its first call")
+        local tr = select(1, Nav.Stuck(nil, 5000, 103.1))
+        local st2
+        tr, st2 = Nav.Stuck(tr, 5000, 105.0)                -- 1.9s of REAL observed stillness
+        assert_true(not st2, "under the 3.0s window after the reset, still not stuck")
+        tr, st2 = Nav.Stuck(tr, 5000, 106.2)                -- now 3.1s genuinely observed
+        assert_true(st2, "a genuinely unreachable stand must STILL trip the watchdog")
     end)
 end)
 
@@ -871,6 +776,19 @@ describe("lib/lane -- PredictClash", function()
         assert_true(cl.settle.x <= -799 and cl.settle.x >= -801, "clamped to the tower line ~-800, got " .. cl.settle.x)
     end)
 
+    it("a tower INSIDE contact range strengthens ITS OWN side (pins the team attribution)", function()
+        -- MUTATION-DRIVEN: every sibling test deliberately parks its tower OUTSIDE contact
+        -- range so it only CLAMPS the settle, leaving the in-range arm - the one that adds
+        -- tower_weight to a side - completely unexercised. Swapping `we` and `wa` in
+        -- lib/lane.lua left the whole suite green, so a tower could strengthen the WRONG side
+        -- and ship. Equal waves plus one tower sitting on the contact: whoever owns it wins.
+        local e = wave(3, 100, 0, 1000)
+        local a = wave(2, -100, 0, 1000)
+        local cl = Lane.PredictClash(e, a, { { pos = { x = 0, y = 0 }, team = 3, range = 700, alive = true } }, OPTS)
+        assert_eq(cl.pushing, "enemy", "an ENEMY-team tower at the contact must push enemy")
+        local cl2 = Lane.PredictClash(e, a, { { pos = { x = 0, y = 0 }, team = 2, range = 700, alive = true } }, OPTS)
+        assert_eq(cl2.pushing, "ally", "an ALLY-team tower at the contact must push ally")
+    end)
     it("uncontested push (no ally wave) drifts fully toward the enemy base", function()
         local e = wave(3, 100, 0, 800)
         local cl = Lane.PredictClash(e, nil, {}, OPTS)
@@ -1314,6 +1232,39 @@ describe("lib/schedule -- Plan low_hp dispatch gate (case-file #2)", function()
         assert_eq(d.action, "shove")
         local d2 = Schedule.Plan(base({}))
         assert_eq(d2.action, "shove")
+    end)
+end)
+
+describe("lib/schedule -- WaveCycleCost + CycleFill (THE CYCLE ARC, v0.1.339)", function()
+    it("cycle cost = 2*(W + rearm + keen); nil-safe", function()
+        assert_eq(Schedule.WaveCycleCost({ w = 160, rearm = 225, keen = 75 }), 920)
+        assert_eq(Schedule.WaveCycleCost({}), 0)
+        assert_eq(Schedule.WaveCycleCost(nil), 0)
+    end)
+    it("g340 fixture: pool 452 vs cycle 920 -> fountain, need capped at max pool 747", function()
+        local f = Schedule.CycleFill({ pool = 452, max_pool = 747, cycle_cost = 920, broke_bar = 460 })
+        assert_eq(f.fill, "fountain"); assert_eq(f.need, 747)
+    end)
+    it("g340 fixture: funded pool 870 with no farm fill -> park, no need", function()
+        local f = Schedule.CycleFill({ pool = 870, max_pool = 1023, cycle_cost = 860, broke_bar = 460 })
+        assert_eq(f.fill, "park"); assert_eq(f.need, nil)
+    end)
+    it("boundary: pool == cycle_cost -> park (not unfunded)", function()
+        assert_eq(Schedule.CycleFill({ pool = 920, max_pool = 1023, cycle_cost = 920, broke_bar = 460 }).fill, "park")
+    end)
+    it("the .296 broke floor keeps authority when cycle_cost reads low", function()
+        local f = Schedule.CycleFill({ pool = 300, max_pool = 747, cycle_cost = 0, broke_bar = 460 })
+        assert_eq(f.fill, "fountain"); assert_eq(f.need, 460)
+    end)
+    it("nil ctx = park (inert default, no crash)", function()
+        assert_eq(Schedule.CycleFill(nil).fill, "park")
+    end)
+    it("g341 re-calibration (v0.1.340): a pool above the broke bar PARKS even under the cycle cost - the trigger is the broke floor only", function()
+        assert_eq(Schedule.CycleFill({ pool = 577, max_pool = 747, cycle_cost = 630, broke_bar = 460 }).fill, "park")
+    end)
+    it("split semantics (v0.1.340): a broke pool triggers via the bar but FILLS to the cycle cost", function()
+        local f = Schedule.CycleFill({ pool = 435, max_pool = 747, cycle_cost = 670, broke_bar = 460 })
+        assert_eq(f.fill, "fountain"); assert_eq(f.need, 670)
     end)
 end)
 
@@ -2072,6 +2023,612 @@ describe("lib/escape - FogProximityRisk", function()
         local both = Escape.FogProximityRisk(snap({ far, near }), Vec(0, 0), OPTS)
         local solo = Escape.FogProximityRisk(snap({ near }), Vec(0, 0), OPTS)
         assert_true(math.abs(both - solo) < 1e-9, "max enemy must dominate")
+    end)
+
+    ------------------------------------------------------------------------
+    -- COMMIT RISK v2, GROUP A: the mechanism assumptions this feature rests on.
+    --
+    -- The commit-risk feature is RADIUS WIDENING: r_eff = risk_radius + widen,
+    -- expressed purely as a larger opts.risk_radius passed into this UNMODIFIED
+    -- function, so lib/escape.lua gains zero modified lines. That makes Group A
+    -- guard rails rather than tests of the diff: no mutation of the commit-risk
+    -- code can fail them. They exist because the alternative mechanism
+    -- (edge subtraction, `edge - widen`) is the one that was measured to stop
+    -- the bot farming, and nothing in the reverted v0.1.357 suite could tell
+    -- the two apart. They also kill mutations of FogProximityRisk itself, which
+    -- IS live code a later edit can break.
+    --
+    -- NOT WRITTEN, deliberately (design 7 A6): `assert(risk <= 1.0)`. That
+    -- assertion is both vacuous and FALSE. weight_fn is applied unbounded at
+    -- lib/escape.lua:910, so d = 0 with weight 1.15 scores exactly 1.150 and
+    -- the docstring's "@return number risk 0..1" at :873 is already inaccurate.
+    -- v0.1.357 shipped that assertion and counted it as mutation-verified.
+    -- A2's grid pins 1.15 at d = 0 instead, which is the same fact with teeth.
+    ------------------------------------------------------------------------
+
+    it("A1 widen 0 is bit-identical to today: risk_radius 1400 == 1400 + 0 (ZERO KILL POWER, disclosed)", function()
+        -- The formal statement of inertness for the 21 reads that pass no widen.
+        -- Exactness is structural (IEEE-754 x + 0.0 == x for every finite x), so
+        -- an epsilon here would be weaker than the code deserves. This is what
+        -- makes COMMIT_APPROACH_SPEED = 0 a genuine no-code-edit rollback.
+        --
+        -- VACUOUS BY CONSTRUCTION, and titled so it cannot be miscounted (the
+        -- same rule TV-4 applies to B8). `1400` and `1400 + 0` are the identical
+        -- Lua value and subtype, so this is f(x) == f(x): a 28-mutation harness
+        -- run tied it to nothing, and nothing can. The property it states lives
+        -- in Tinker.lua, not here, and B15 is where a mutation of it dies.
+        local w0 = { risk_radius = 1400 + 0, fog_ms = 550, fog_spread = 900, age_cap = 5 }
+        local hs = {
+            { pos = Vec(0, 0),    age = 0, probable_radius = 0, visible = true },
+            { pos = Vec(713, 91), age = 0, probable_radius = 0, visible = true },
+            { pos = Vec(-1200, 400), age = 2.5, probable_radius = 0, visible = false },
+            { pos = Vec(2600, -1700), age = 0, probable_radius = 0, visible = true },
+        }
+        for i = 1, #hs do
+            for _, pt in ipairs({ Vec(0, 0), Vec(500, 500), Vec(-900, 1200), Vec(3000, 3000) }) do
+                local a = Escape.FogProximityRisk(snap({ hs[i] }), pt, OPTS)
+                local b = Escape.FogProximityRisk(snap({ hs[i] }), pt, w0)
+                assert_true(a == b, "widen 0 must be bit-identical, got " .. a .. " vs " .. b)
+            end
+        end
+    end)
+
+    it("A2 visible closed form over d x widen x weight: (1 - d/(1400+W))^2 * w", function()
+        -- Kills MECH_edge_sub (which pins 1.0 across the whole near field),
+        -- MECH_divisor_only, MECH_guard_only, MECH_sign_flip, RISK_clamped_to_1
+        -- (the d=0 / weight 1.15 cell is exactly 1.15, above 1.0) and
+        -- WEIGHT_fn_dropped.
+        for _, d in ipairs({ 0, 200, 400, 700, 1000, 1400, 2000, 3000 }) do
+            for _, W in ipairs({ 0, 300, 1400, 3500 }) do
+                for _, wt in ipairs({ 1, 0.6, 1.15 }) do
+                    local r_eff = 1400 + W
+                    local want = 0
+                    if d < r_eff then
+                        local r = 1 - d / r_eff
+                        want = r * r * wt
+                    end
+                    local o = { risk_radius = r_eff, fog_ms = 550, fog_spread = 900, age_cap = 5,
+                                weight_fn = function(_) return wt end }
+                    local h = { pos = Vec(d, 0), age = 0, probable_radius = 0, visible = true }
+                    local got = Escape.FogProximityRisk(snap({ h }), Vec(0, 0), o)
+                    assert_true(math.abs(got - want) < 1e-12,
+                        ("d=%d W=%d w=%s: got %.17g want %.17g"):format(d, W, tostring(wt), got, want))
+                end
+            end
+        end
+    end)
+
+    it("A3 SATURATION GUARD: widening never flattens the near field", function()
+        -- THE test that discriminates radius widening from edge subtraction, and
+        -- the one the reverted suite did not have. Under `edge - widen` at W=3500
+        -- every one of these distances scores exactly 1.000: monotone-but-equal,
+        -- veto everywhere, zero ranking information (measured: 1 distinct value
+        -- over d = 0..1400 in 10u steps, against 141 for radius widening).
+        -- srisk ranks mid vs side off this number, so a flat near field breaks
+        -- ranking as well as vetoing.
+        -- Kept even though A2 strictly implies it: A2 is a closed form that any
+        -- legitimate future model change forces someone to rewrite, and the
+        -- temptation then is to loosen it. A3 asserts a property that survives
+        -- ANY monotone falloff.
+        local o = { risk_radius = 1400 + 3500, fog_ms = 550, fog_spread = 900, age_cap = 5 }
+        local function risk_at(d)
+            local h = { pos = Vec(d, 0), age = 0, probable_radius = 0, visible = true }
+            return Escape.FogProximityRisk(snap({ h }), Vec(0, 0), o)
+        end
+        local ds = { 0, 200, 700, 1400, 2000 }
+        local point_blank = risk_at(0)
+        local prev
+        for i = 1, #ds do
+            local r = risk_at(ds[i])
+            if prev then
+                assert_true(prev - r > 0.01,
+                    ("adjacent distances must stay DISTINGUISHABLE: d=%d %.4f vs d=%d %.4f")
+                        :format(ds[i - 1], prev, ds[i], r))
+            end
+            if ds[i] > 0 then
+                assert_true(r < point_blank,
+                    ("d=%d must stay strictly BELOW point-blank: %.4f vs %.4f")
+                        :format(ds[i], r, point_blank))
+            end
+            prev = r
+        end
+    end)
+
+    it("A4 fog closed form over d x age x widen: the widening never touches the edge", function()
+        -- radius = age*fog_ms is a POSITION correction (where the enemy could be
+        -- now); risk_radius is the kernel BANDWIDTH (how far away an enemy still
+        -- matters). Putting the widen into the edge double-counts it as a
+        -- position and saturates, which is edge subtraction under another name.
+        -- conf depends only on age and fog_ms, neither of which the widen
+        -- touches, so it must ride along multiplicatively and unchanged.
+        -- Kills WIDEN_visible_only, WIDEN_fogged_only, WIDEN_into_conf.
+        for _, d in ipairs({ 0, 400, 1000, 1400, 2000, 3000 }) do
+            for _, age in ipairs({ 0, 0.5, 2, 5 }) do
+                for _, W in ipairs({ 0, 300, 1400, 3500 }) do
+                    local r_eff = 1400 + W
+                    local radius = age * 550
+                    local edge = d - radius
+                    if edge < 0 then edge = 0 end
+                    local base = 0
+                    if edge < r_eff then
+                        local r = 1 - edge / r_eff
+                        base = r * r
+                    end
+                    local want = base * (900 / (900 + radius))
+                    local o = { risk_radius = r_eff, fog_ms = 550, fog_spread = 900, age_cap = 5 }
+                    local h = { pos = Vec(d, 0), age = age, probable_radius = 0, visible = false }
+                    local got = Escape.FogProximityRisk(snap({ h }), Vec(0, 0), o)
+                    assert_true(math.abs(got - want) < 1e-12,
+                        ("d=%d age=%s W=%d: got %.17g want %.17g"):format(d, tostring(age), W, got, want))
+                end
+            end
+        end
+    end)
+
+    it("A5 the widen must reach BOTH the guard and the divisor: risk(1500) > 0 at W=1400", function()
+        -- The one-line-change trap. risk_radius is read at exactly two live
+        -- sites, the guard at :905 and the divisor at :906. Widen only the
+        -- divisor and every edge in [1400, r_eff) still takes base = 0, so the
+        -- widening does nothing past 1400u: the exact defect being fixed,
+        -- surviving with a green near-field suite. Kills MECH_divisor_only.
+        local o = { risk_radius = 1400 + 1400, fog_ms = 550, fog_spread = 900, age_cap = 5 }
+        local h = { pos = Vec(1500, 0), age = 0, probable_radius = 0, visible = true }
+        local got = Escape.FogProximityRisk(snap({ h }), Vec(0, 0), o)
+        assert_true(got > 0, "an enemy at 1500u must score above 0 once the radius is widened to 2800")
+        assert_eq(Escape.FogProximityRisk(snap({ h }), Vec(0, 0), OPTS), 0,
+            "and must still score exactly 0 unwidened (that IS the defect)")
+    end)
+end)
+
+describe("lib/escape - CommitWiden (commit risk v2, group B)", function()
+    local Escape = require("lib.escape")
+    local CW = Escape.CommitWiden
+
+    it("B1 nominal: 50 u/s over travel 4.4 + stand 4.0 is exactly 420u", function()
+        -- The shipped median shove commit (travel= 4.4 is the keened clamp, on
+        -- 25 of 73 g356 commits). Kills a wrong speed factor, either term being
+        -- dropped, and a cap inversion (math.max(cap, ...) instead of min).
+        assert_eq(CW(4.4, 4.0, 50, 2000), 420)
+    end)
+
+    it("B2 TRANSIT sample: stand 0 keeps the travel term and only the travel term", function()
+        -- Kills TRAVEL_term_dropped (the second call would read 0) and
+        -- ADDITIVE_floor (a `math.max(floor, w)` would lift the first off 0).
+        assert_eq(CW(0, 0, 50, 2000), 0)
+        assert_eq(CW(10, 0, 50, 2000), 500)
+    end)
+
+    it("B3 STAND only: travel 0 still widens by the stand term (arrival, not transit)", function()
+        assert_eq(CW(0, 4.0, 50, 2000), 200)   -- kills STAND_term_dropped
+    end)
+
+    it("B4 nil travel coalesces to 0, it does not throw", function()
+        assert_eq(CW(nil, 4.0, 50, 2000), 200) -- kills TRAVEL_nilcoalesce_dropped
+    end)
+
+    it("B5 nil stand coalesces to 0, it does not throw", function()
+        -- 50 * 4.4 is 220.00000000000002842 in IEEE-754 doubles, measured on the
+        -- deployed Lua 5.4, so the design's `== 220` is not attainable and the
+        -- epsilon is the float, not a loosened assertion. Kill power is
+        -- unaffected: STAND_nilcoalesce_dropped is an arithmetic-on-nil throw,
+        -- not a small numeric drift.
+        assert_true(math.abs(CW(4.4, nil, 50, 2000) - 220) < 1e-9,
+            "nil stand must coalesce to 0, got " .. tostring(CW(4.4, nil, 50, 2000)))
+    end)
+
+    it("B6 nil approach_speed reads as OFF, not as an arithmetic error", function()
+        assert_eq(CW(4.4, 4.0, nil, 2000), 0)  -- kills SPEED_nilcoalesce_dropped
+    end)
+
+    it("B7 NEGATIVE approach_speed is clamped to 0, never to a SHRINKING widen", function()
+        -- The case the reverted build left uncovered. "approach_speed 0 disables
+        -- it" cannot fail on the `<= 0` guard because 0 * exposure is 0 anyway
+        -- (see B8); a NEGATIVE speed is the input that has teeth, because an
+        -- unguarded -50 gives widen -420, r_eff = 1400 + widen SHRINKS every
+        -- danger radius, and the bot goes blind rather than cautious, silently
+        -- and exactly backwards.
+        --
+        -- THE GUARD IS KILLABLE AND THE FOURTH SIGN CELL IS WHAT KILLS IT.
+        -- Earlier revisions of this comment recorded the guard as an EQUIVALENT
+        -- MUTANT ("no test can kill it through the return value") because
+        -- math.max(0, w) absorbs a negative product and `or 0` absorbs nil.
+        -- That is true of three of the four sign cells and false of the fourth:
+        -- with speed AND exposure both negative the product turns POSITIVE,
+        -- math.max passes it through untouched, and the guard is the only thing
+        -- refusing it. Measured against the harness, not argued:
+        --      shipped                        -> 0
+        --      `<= 0` mutated to `== 0`       -> 420.0   (suite 854/1, FAIL B7)
+        --      guard deleted outright         -> 420.0   (suite 854/1, FAIL B7)
+        -- Re-measured after the cap sanitise landed; the totals track the suite
+        -- size (they read 852/1 when it was 853 tests), the 420.0 and the FAIL
+        -- do not. The kill is NOT a side effect of sanitising the cap either:
+        -- the killing cell passes the perfectly valid cap 2000, so the sanitise
+        -- is a no-op on it and the fourth sign cell alone does the work.
+        -- The wrong comment was the more dangerous half: it instructed the next
+        -- reader that the hole could not be closed, so it would not have been.
+        -- The redundancy pair is still covered from both sides: B12 kills the
+        -- clamp alone, B7 kills guard-and-clamp dropped together.
+        assert_eq(CW(4.4, 4.0, -50, 2000), 0)
+        assert_eq(CW(4.4, 4.0, -1e-9, 2000), 0)
+        assert_eq(CW(-4.4, -4.0, 50, 2000), 0)   -- negative EXPOSURE, the clamp's own path
+        assert_eq(CW(-4.4, -4.0, -50, 2000), 0)  -- 4th sign cell: neg x neg = +420 past the clamp
+        assert_eq(CW(-10, 0, -50, 2000), 0)      -- same, single term
+        assert_true(CW(4.4, 4.0, -50, 2000) >= 0, "widen must never be negative")
+    end)
+
+    it("B8 zero approach_speed is the no-code-edit kill switch (ZERO KILL POWER, disclosed)", function()
+        -- 0 * exposure is 0 with or without the guard, so NO mutation of the
+        -- guard can fail this test. It is a contract statement pinning the
+        -- documented rollback path, and it must never be counted toward a
+        -- mutation-verified claim. Recorded here because v0.1.357 counted it.
+        assert_eq(CW(5000, 4.0, 0, 2000), 0)
+    end)
+
+    it("B9 the cap binds when exposure runs past it", function()
+        assert_eq(CW(100, 0, 50, 2000), 2000)  -- kills CAP_dropped
+    end)
+
+    it("B10 nil cap is UNCAPPED and cap 0 is ZERO widen (not the v0.1.357 footgun)", function()
+        -- v0.1.357 shipped `widen_max = 0 means uncapped`, so a config typo of 0
+        -- produced an unbounded widen: a footgun pointing the dangerous way.
+        -- `widen_max or math.huge` makes nil uncapped and 0 zero, which is what
+        -- the parameter name says. (The design's B10 row asserts > 100000 on
+        -- args that yield 50000; the arithmetic there is a slip. Pinned exactly
+        -- instead, plus "past the shipped cap", which is the property meant.)
+        assert_eq(CW(1000, 0, 50, nil), 50000)
+        assert_true(CW(1000, 0, 50, nil) > 2000, "nil cap must not fall back to the shipped cap")
+        assert_eq(CW(1000, 0, 50, 0), 0)       -- kills CAP_uncapped_broken
+    end)
+
+    it("B11 the cap does NOT bind inside the normal operating range", function()
+        -- Findings section 3's trap, twice-bitten: WIDEN_MAX silently becomes
+        -- the OPERATING value if it sits inside the normal range, and then the
+        -- travel term stops mattering entirely (cap 1400 / APPROACH 175 binds at
+        -- d = 0; cap 3500 / APPROACH 300 binds at d = 1173u). 35s exposure is
+        -- 6s past the largest observed shove exposure (29.0s).
+        assert_true(CW(31, 4.0, 50, 2000) < 2000, "35s exposure must not be cap-bound")
+        assert_true(CW(25, 4.0, 50, 2000) > CW(10, 4.0, 50, 2000) + 100,
+            "travel must still move the widen inside the operating range")
+    end)
+
+    it("B12 a NaN exposure clamps to 0, NOT to the maximum widening", function()
+        -- The clamp ORDER is load-bearing. Measured on the deployed Lua 5.4:
+        --   math.max(0, nan) = 0        math.min(2000, nan) = 2000
+        --   math.min(2000, math.max(0, nan)) = 0     <- shipped
+        --   math.max(0, math.min(2000, nan)) = 2000  <- reversed, silently maximal
+        -- Kills CLAMP_order_reversed, and also CLAMP_negative_dropped (dropping
+        -- math.max(0, .) leaves min(2000, nan) = 2000). Without this test a NaN
+        -- widen ships as the widest possible radius, and CO-1's other half
+        -- (r_eff = NaN makes `edge < r_eff` false for every enemy, so every
+        -- destination reads safe) is the exact defect being fixed arriving
+        -- silently through the fix.
+        local nan = 0 / 0
+        assert_true(nan ~= nan, "0/0 must actually be NaN on this Lua")
+        assert_eq(CW(nan, 4.0, 50, 2000), 0)
+        assert_eq(CW(4.4, nan, 50, 2000), 0)
+    end)
+
+    it("B12b a NEGATIVE or NaN CAP is sanitised, it is not passed through", function()
+        -- The clamp order defends the EXPOSURE argument (B12) and nothing else:
+        -- min(cap, max(0, w)) hands a bad `cap` straight to the caller, so CO-1
+        -- survives its own fix through the other parameter. Both cells measured
+        -- against the pre-sanitise function: cap -500 returned -500 (a negative
+        -- widen SHRINKS r_eff = the bot goes blind, exactly backwards, which is
+        -- the failure the approach_speed guard exists to prevent) and a NaN cap
+        -- returned NaN (`edge < NaN` is false for every enemy at every distance,
+        -- so every destination reads safe). Unreachable from the two shipped
+        -- call sites, which both pass K.COMMIT_WIDEN_MAX; pinned because this is
+        -- public API on a lib file three heroes load, and the @return contract
+        -- says "always finite and >= 0 for every input".
+        assert_eq(CW(4.4, 4.0, 50, -500), 0)
+        local nan = 0 / 0
+        assert_eq(CW(4.4, 4.0, 50, nan), 0)
+        assert_eq(CW(4.4, 4.0, 50, math.huge), 420)   -- an infinite cap is still just uncapped
+    end)
+
+    it("B13 CONFIG LINT: WIDEN_MAX >= APPROACH_SPEED * 35, and both integral, in the real Tinker.lua", function()
+        -- B11 hardcodes 50/4.0/2000 and therefore CANNOT see the shipped
+        -- constants: retune the speed to 300, leave the cap at 3500, and B11
+        -- stays green while the cap binds at 1173u. This reads the live values
+        -- out of the source text so editing one constant without the other
+        -- fails here. Kills ZERO code mutants by design: it is a config lint,
+        -- not an implementation test. Precedent for reading Tinker.lua as text
+        -- is the fog probe contract block below.
+        local f = assert(io.open("Tinker/Tinker.lua", "r"),
+            "cannot open Tinker/Tinker.lua (run the suite from the repo root)")
+        local src = f:read("*a"); f:close()
+        local function num(name)
+            local v = src:match(name .. "%s*=%s*(%-?[%d%.]+)")
+            -- The load-bearing row: a text test that silently extracts nothing
+            -- IS the vacuous test that shipped twice on this project.
+            assert_true(v ~= nil, "constant " .. name .. " not found in Tinker/Tinker.lua "
+                .. "(renamed? then this lint is dead and the coupling is unguarded)")
+            local n = tonumber(v)
+            assert_true(n ~= nil, "constant " .. name .. " parsed as non-numeric: " .. tostring(v))
+            return n
+        end
+        local speed = num("COMMIT_APPROACH_SPEED")
+        local stand = num("COMMIT_STAND_S")
+        local cap   = num("COMMIT_WIDEN_MAX")
+        assert_true(stand >= 0, "COMMIT_STAND_S must not be negative, got " .. stand)
+
+        -- INTEGRALITY: the VALUE half of the crash path B14 guards from the
+        -- FORMAT half. `%d` throws "number has no integer representation" on a
+        -- fractional argument, and that string.format runs at the emitter on
+        -- the decide path, BEFORE logline's pcall and inside a decide that
+        -- OnUpdateEx does not pcall, i.e. the v0.1.247 stuck-in-DECIDE freeze at
+        -- roughly 50 errors/s. These two constants are the only commit_risk
+        -- fields fed straight from a TUNING KNOB, so a config edit alone is the
+        -- whole reproduction. The cap invariant below does NOT see it: speed
+        -- 50.5 with cap 2000 honours `cap >= speed * 35` and passes today.
+        -- Asserted with the real conversion rather than `n % 1 == 0` because
+        -- the throw, not the arithmetic, is the failure being pinned. Costs
+        -- nothing anyone intends: the documented tightening ladder is
+        -- 50/75/100 and 2000/3000/3500, integral at every rung. COMMIT_STAND_S
+        -- is deliberately excluded, it is 4.0 and prints under %.1f.
+        assert_true((pcall(string.format, "%d", speed)),
+            "COMMIT_APPROACH_SPEED must be integral, got " .. speed
+                .. " (a %d conversion on it throws on the decide path)")
+        assert_true((pcall(string.format, "%d", cap)),
+            "COMMIT_WIDEN_MAX must be integral, got " .. cap
+                .. " (a %d conversion on it throws on the decide path)")
+
+        assert_true(cap >= speed * 35,
+            ("COMMIT_WIDEN_MAX %d must be >= COMMIT_APPROACH_SPEED %d * 35 = %d, or the cap "
+             .. "becomes the operating value and the travel term stops mattering")
+                :format(cap, speed, speed * 35))
+    end)
+
+    it("B14 LOGLINE CONTRACT: commit_risk parses under the analyzer's own kv pattern", function()
+        -- A silent gate reads exactly like a dead one. This repo has shipped a
+        -- born-dead instrument twice (v0.1.348 walk_leg, v0.1.346 keen probe),
+        -- both times because the emitter and the analyzer pattern were coupled
+        -- by nothing. Read BOTH out of the real sources and prove they agree.
+        local function slurp(p)
+            local f = assert(io.open(p, "r"), "cannot open " .. p .. " (run the suite from the repo root)")
+            local s = f:read("*a"); f:close(); return s
+        end
+        local tinker = slurp("Tinker/Tinker.lua")
+        local parser = slurp("tools/parse_debuglog.lua")
+
+        -- The format is written as adjacent literals glued by `..`, so a single
+        -- '"(commit_risk[^"]+)"' match would truncate it at the first closing
+        -- quote and this test would then pass on half a line. Splice the chain.
+        local function fmt_from(src, head)
+            local i = src:find('"' .. head, 1, true)
+            if not i then return nil end
+            local out, pos = nil, i
+            while true do
+                local _, e, lit = src:find('^"([^"]*)"', pos)
+                if not e then break end
+                out = (out or "") .. lit
+                pos = e + 1
+                local _, ce = src:find("^%s*%.%.%s*", pos)
+                if not ce then break end
+                pos = ce + 1
+            end
+            return out
+        end
+        local fmt = fmt_from(tinker, "commit_risk ")
+        local kv_pat = parser:match('kvs:gmatch%("([^"]+)"%)')
+        assert_true(fmt ~= nil, "no commit_risk format string found in Tinker.lua")
+        assert_true(kv_pat ~= nil, "no kv pattern found in parse_debuglog.lua")
+
+        -- The two fields that echo TUNING CONSTANTS must tolerate a fractional
+        -- value. string.format runs at the emitter's call site, BEFORE logline's
+        -- pcall (Tinker.lua:73-77) and inside a decide that OnUpdateEx does not
+        -- pcall, so a %d conversion against COMMIT_APPROACH_SPEED = 62.5 (a
+        -- plausible rung between the documented 50 and 75) throws "number has no
+        -- integer representation" every decide: a CONFIG EDIT ALONE reproduces
+        -- the v0.1.247 stuck-in-DECIDE crash, with the diag slider offering no
+        -- protection. wcap/v1/chg/nh keep %d correctly - they take `and 1 or 0`
+        -- and a `#` length, which are integers by construction.
+        for _, key in ipairs({ "ap", "wmax" }) do
+            -- %f[%w] frontier, not a bare find: "wcap=%d" CONTAINS "ap=", so an
+            -- unanchored match reads wcap's conversion and reports it as ap's.
+            local conv = fmt:match("%f[%w]" .. key .. "=(%%[-+ #0-9.]*%a)")
+            assert_true(conv ~= nil, "no conversion found for " .. key .. "= in the commit_risk format")
+            assert_true((pcall(string.format, conv, 62.5)),
+                ("%s= uses %s, which throws on a fractional tuning constant inside the risk path")
+                    :format(key, conv))
+        end
+
+        -- Build a real line from the real format: derive one argument per
+        -- conversion so the test survives a field reorder but not a field drop.
+        local args = {}
+        for conv in fmt:gsub("%%%%", ""):gmatch("%%[-+ #0-9.]*(%a)") do
+            args[#args + 1] = (conv == "s") and "mid" or 1
+        end
+        local line = string.format(fmt, table.unpack(args))
+
+        local kv = {}
+        for k, v in line:gmatch(kv_pat) do kv[k] = v end
+        -- br= joined the contract in v0.1.359 (the early-return arm): every commit-gated call now
+        -- emits, naming which of lane_unsafe's five returns it took, so a branch that never logs
+        -- provably never ran. The count below is the teeth: it fails BOTH on a dropped field and on
+        -- a silently added one, which is how it caught br= arriving.
+        for _, key in ipairs({ "t", "site", "br", "exp", "st", "wd", "wcap", "ap", "wmax",
+                               "r0", "r1", "g", "v1", "chg", "ne", "nh" }) do
+            assert_true(kv[key] ~= nil, "field " .. key .. "= missing from the parsed commit_risk line: " .. line)
+        end
+        -- No value may contain a space, or (%S+)=(%S+) silently swallows the
+        -- next field. Every whitespace token past the event name must be a k=v.
+        local n = 0
+        for tok in line:gmatch("%S+") do
+            if tok ~= "commit_risk" then
+                assert_true(tok:find("=", 1, true) ~= nil,
+                    "stray token with no '=' (a unit suffix or a space inside a value): " .. tok)
+                n = n + 1
+            end
+        end
+        assert_eq(n, 16, "commit_risk must carry exactly the 16 contracted fields")
+    end)
+
+    it("B15 HERO LINT: the two load-bearing hero-side lines are still wired", function()
+        -- Design 7.1 item 3 files the whole feature's one changed line as
+        -- "untestable hero-side" and routes it to a FIELD signature (r0 == r1 on
+        -- every logged line). A harness run made that unacceptable: deleting
+        -- `+ (widen or 0)` from enemy_risk_at leaves the ENTIRE suite green, so
+        -- the only guard on the one line the feature IS would be one column of a
+        -- log that does not exist yet, read after a game has already been played.
+        -- Same class, and worse because the field signature MISREADS it: making
+        -- the verdict fall back to the un-widened read while still computing and
+        -- logging r1 emits r1 > r0 with chg=0, which design 6.4's table calls
+        -- "live and correctly inert, the expected first-game outcome".
+        --
+        -- A text lint is the laziest thing that can fail on either. Same idiom
+        -- and same TV-6 nil-guard rule as B13/B14: it asserts the pattern was
+        -- FOUND, so a rename fails loudly here instead of silently extracting
+        -- nothing. It pins semantics, not layout - anything may move around it.
+        local f = assert(io.open("Tinker/Tinker.lua", "r"),
+            "cannot open Tinker/Tinker.lua (run the suite from the repo root)")
+        local src = f:read("*a"); f:close()
+        assert_true(src:find("risk_radius%s*=%s*K%.RISK_RADIUS%s*%+%s*%(%s*widen%s+or%s+0%s*%)") ~= nil,
+            "enemy_risk_at no longer adds the widen to risk_radius: THE feature is gone, and the "
+            .. "21 unwidened reads need the `or 0` to stay bit-identical (dropping it throws on them)")
+        assert_true(src:find("local%s+r1%s*=%s*enemy_risk_at%s*%(%s*p%s*,%s*w%s*%)") ~= nil,
+            "lane_unsafe no longer computes r1 from the widened read")
+        assert_true(src:find("local%s+unsafe%s*=%s*r1%s*>=%s*K%.SHOVE_SAFE_RISK") ~= nil,
+            "lane_unsafe's VERDICT no longer comes from r1: the gate has silently reverted to the "
+            .. "un-widened read while the instrument keeps logging r1, which reads as healthy")
+        -- The side producer's throttle key must be the LANE, never a literal.
+        -- eval_side_lanes runs side_wave_ctx for both {"top","bot"} in ONE decide
+        -- at ONE now(), so a shared "side" key gives DiagGate dt = 0 on the
+        -- second lane and bot never logs, systematically (the loop order is
+        -- fixed). This one has no field signature at all: analyzer A1 still sees
+        -- 2 distinct sites and still prints PASS, and the logline carries no lane
+        -- field, so nothing post-hoc recovers it. Offline text is the only place
+        -- it can be caught, which is why it is pinned rather than trusted.
+        assert_true(src:find('site%s*=%s*lane,%s*travel%s*=%s*travel') ~= nil,
+            "the side shove gate no longer tags its site with the lane: top and bot share one "
+            .. "throttle stamp again (v0.1.357 failure 1 at half scope)")
+    end)
+end)
+
+describe("lib/escape - DiagGate (commit risk v2, group C)", function()
+    local Escape = require("lib.escape")
+    local DG = Escape.DiagGate
+
+    it("C1 the FIRST call emits, even at t = 0 exactly", function()
+        -- Not academic: now() is GameRules.GetDOTATime(false, false), which
+        -- `negative=false` pins at exactly 0.0 for the first ~102 real seconds
+        -- of every match (measured, g356). `or 0` instead of `or -math.huge`
+        -- would silence the instrument for that whole window.
+        local s = {}
+        assert_true(DG(s, "a", 0, 2), "first call at t=0 must emit")
+    end)
+
+    it("C2 the same key inside the window is suppressed", function()
+        local s = {}
+        DG(s, "a", 0, 2)
+        assert_false(DG(s, "a", 1, 2), "1s into a 2s window must suppress")
+    end)
+
+    it("C3 exactly at the window boundary emits", function()
+        local s = {}
+        DG(s, "a", 0, 2)
+        assert_true(DG(s, "a", 2, 2), "dt == window must emit (kills `dt <= window`)")
+    end)
+
+    it("C4 a DIFFERENT key inside the window still EMITS (keys never starve each other)", function()
+        -- THE test that would have caught v0.1.357 failure 1: a single shared
+        -- stamp aliases to whichever call site ran first, so hundreds of calls
+        -- per decide sampled only that one and the log could sit empty while
+        -- another site actively vetoed. site=mid and site=side must be
+        -- independent, and nothing else in the log reveals it if they are not.
+        local s = {}
+        DG(s, "mid", 0, 2)
+        assert_true(DG(s, "side", 1, 2), "a distinct key must not be throttled by another key's stamp")
+        assert_false(DG(s, "mid", 1, 2), "and the first key must still be throttled")
+    end)
+
+    it("C5 the stamp advances ONLY on emit", function()
+        -- Failure 1's literal mechanism: moving `stamps[key] = t` above the
+        -- `return false` re-stamps on every suppressed call, so a call every
+        -- frame pushes the deadline forever and the line never emits again.
+        local s = {}
+        assert_true(DG(s, "a", 0, 2), "emit at t=0")
+        assert_false(DG(s, "a", 1, 2), "suppress at t=1")
+        assert_true(DG(s, "a", 2, 2), "MUST emit at t=2: the suppressed call must not have re-stamped")
+    end)
+
+    it("C6 a BACKWARDS clock EMITS and rewinds the stamp, it does not go silent", function()
+        -- An instrument's failure direction must be noisy, never silent. A
+        -- backwards now() is possible on a match transition without a script
+        -- reload (UCZone's reload behaviour at a match boundary is not
+        -- documented, and State.hero is never nilled), and `dt >= 0` makes the
+        -- answer not matter. NOTE the pre-stamp: on a FRESH table the stamp is
+        -- -math.huge, dt is +inf, and the test would pass with the guard
+        -- removed. It has to start from a stamped future to have kill power.
+        local s = {}
+        assert_true(DG(s, "a", 100, 2), "stamp the future first")
+        assert_true(DG(s, "a", -5, 2), "a backwards jump must EMIT (kills the `dt >= 0` guard)")
+        assert_eq(s["a"], -5, "and must rewind the stamp, or the gate stays wedged until t catches up")
+        assert_false(DG(s, "a", -4, 2), "normal throttling resumes from the rewound stamp")
+    end)
+end)
+
+describe("lib/escape - NearestEnemyEdge (commit risk v2, group D)", function()
+    local Escape = require("lib.escape")
+    local NEE = Escape.NearestEnemyEdge
+    -- Plain {x,y} tables on purpose: pt crosses the hero->lib boundary and both
+    -- snap_walkable and Farm.PathRisk build plain tables, while origin() and
+    -- Map.CampCenter return engine Vectors. A pt:Distance2D in here is the
+    -- v0.1.247 stuck-in-DECIDE crash, so the tests never provide the method.
+    local function P(x, y) return { x = x, y = y } end
+
+    it("D1 a VISIBLE enemy contributes plain distance", function()
+        local snap = { heroes = { { pos = P(900, 1200), age = 0, visible = true } } }
+        assert_eq(NEE(snap, P(0, 0)), 1500)  -- 3/4/5 triangle
+    end)
+
+    it("D1b takes the NEAREST over several enemies", function()
+        local snap = { heroes = {
+            { pos = P(3000, 0), age = 0, visible = true },
+            { pos = P(700, 0),  age = 0, visible = true },
+            { pos = P(1600, 0), age = 0, visible = true },
+        } }
+        assert_eq(NEE(snap, P(0, 0)), 700)
+    end)
+
+    it("D2 a FOGGED enemy subtracts the age disc and floors at 0", function()
+        -- Same edge rule as FogProximityRisk:897-901. age * fog_ms is the
+        -- probable-position disc; the widen never enters here.
+        local far = { heroes = { { pos = P(2000, 0), age = 1, visible = false } } }
+        assert_eq(NEE(far, P(0, 0)), 2000 - 550)
+        local covered = { heroes = { { pos = P(400, 0), age = 2, visible = false } } }
+        assert_eq(NEE(covered, P(0, 0)), 0)   -- disc 1100 covers pt: floors, never negative
+        local tuned = { heroes = { { pos = P(2000, 0), age = 2, visible = false } } }
+        assert_eq(NEE(tuned, P(0, 0), { fog_ms = 300 }), 2000 - 600)
+    end)
+
+    it("D3 an EMPTY snapshot returns math.huge, not 0", function()
+        -- The sentinel. Without it "no enemies" logs as ne=0 and reads as
+        -- "enemy standing on top of me", which inverts every calibration read
+        -- this field exists to provide.
+        assert_eq(NEE({ heroes = {} }, P(0, 0)), math.huge)
+        assert_eq(NEE(nil, P(0, 0)), math.huge)
+        assert_eq(NEE({ heroes = { { pos = P(0, 0), age = 0, visible = true } } }, P(0, 0)), 0,
+            "and a real enemy at 0u must still read 0, so the two stay distinguishable")
+    end)
+
+    it("D4 agrees with the risk kernel: risk == (1 - ne/r_eff)^2 * w", function()
+        -- A divergence between the two edge rules would silently make every
+        -- ne= in the log wrong, and ne= is the field the whole calibration
+        -- ladder is read off. Checked against the real FogProximityRisk.
+        for _, d in ipairs({ 0, 300, 900, 1400, 2600 }) do
+            for _, W in ipairs({ 0, 420, 1400 }) do
+                local r_eff = 1400 + W
+                local snap = { heroes = { { pos = P(d, 0), age = 0, probable_radius = 0, visible = true } } }
+                local o = { risk_radius = r_eff, fog_ms = 550, fog_spread = 900, age_cap = 5 }
+                local ne = NEE(snap, P(0, 0), o)
+                assert_eq(ne, d, "edge must be plain distance for a visible enemy")
+                local want = 0
+                if ne < r_eff then local r = 1 - ne / r_eff; want = r * r end
+                assert_true(math.abs(Escape.FogProximityRisk(snap, P(0, 0), o) - want) < 1e-12,
+                    ("d=%d W=%d: the kernel and ne= must use the same edge"):format(d, W))
+            end
+        end
     end)
 end)
 
@@ -3087,6 +3644,383 @@ describe("lib/defense -- v0.5.127 CD-aware lock release", function()
     end)
 end)
 
+describe("fog probe <-> analyzer format contract (v0.1.353)", function()
+    -- The probe's format string lives in Tinker/Tinker.lua (which this suite cannot load:
+    -- it needs the engine) and its ONLY consumer is a Lua pattern in
+    -- tools/parse_debuglog.lua. Nothing couples them, so editing one silently breaks the
+    -- other and the failure surfaces as a MISSING section in the report AFTER a game has
+    -- been spent. This repo has shipped that exact failure twice (the v0.1.348 walk_leg
+    -- instrument that was born dead, and the v0.1.346 keen probe that lied), so pin the
+    -- contract by reading BOTH out of the real sources and proving they still agree.
+    local function slurp(p)
+        local f = assert(io.open(p, "r"), "cannot open " .. p .. " (run the suite from the repo root)")
+        local s = f:read("*a"); f:close(); return s
+    end
+    local tinker = slurp("Tinker/Tinker.lua")
+    local parser = slurp("tools/parse_debuglog.lua")
+
+    local hero_fmt = tinker:match('"(fog_hero raw=[^"]+)"')
+    local hero_pat = parser:match('"(fog_hero raw=[^"]+)"')
+    local probe_fmt = tinker:match('"(fog_probe t=[^"]+)"')
+    local probe_pat = parser:match('"(fog_probe [^"]+)"')
+
+    it("both sides of the contract are still present in the sources", function()
+        assert_true(hero_fmt ~= nil, "no fog_hero format string found in Tinker.lua")
+        assert_true(hero_pat ~= nil, "no fog_hero pattern found in parse_debuglog.lua")
+        assert_true(probe_fmt ~= nil, "no fog_probe format string found in Tinker.lua")
+        assert_true(probe_pat ~= nil, "no fog_probe pattern found in parse_debuglog.lua")
+    end)
+
+    it("a normal fog_hero line the probe emits is parsed by the analyzer", function()
+        local line = string.format(hero_fmt, "200.0", "-100.0", "3.4", 900, "npc_dota_hero_pudge")
+        local raw, areal, d, nm = line:match(hero_pat)
+        assert_eq(raw, "200.0")
+        assert_eq(areal, "3.4")
+        assert_eq(d, "900")
+        assert_eq(nm, "npc_dota_hero_pudge")
+    end)
+
+    it("a NEGATIVE d is parsed: the probe emits d=-1 when the hero origin is unreadable", function()
+        -- enemy_snapshot sets `local d = -1` when origin(State.hero) returns nil, which is
+        -- reachable (Entity.GetAbsOrigin throws on a stale handle at game teardown - the
+        -- v0.1.258 pcall guard exists for exactly that). A pattern demanding %d+ drops the
+        -- line silently, undercounting `reads` and corrupting the nil-share denominator.
+        local line = string.format(hero_fmt, "nil", "nil", "nil", -1, "npc_dota_hero_lion")
+        local raw, _, d = line:match(hero_pat)
+        assert_eq(raw, "nil")
+        assert_eq(d, "-1")
+    end)
+
+    it("a nil raw and an unknown name still parse", function()
+        local line = string.format(hero_fmt, "nil", "nil", "nil", 4000, "?")
+        local raw, _, d, nm = line:match(hero_pat)
+        assert_eq(raw, "nil")
+        assert_eq(d, "4000")
+        assert_eq(nm, "?")
+    end)
+
+    it("the fog_probe line parses, including a negative offset", function()
+        -- v0.1.354 added vtrack/vev/vtypes AFTER off=, so the format takes 7 args now.
+        -- This test failed the moment those fields were added, which is exactly its job:
+        -- the probe and its parser live in different files with nothing else coupling them.
+        local line = string.format(probe_fmt, 100.0, -103.4, 1, 2, 3, 4, "1:5")
+        -- the analyzer pattern captures t FIRST (added when the pregame outlier was excluded),
+        -- so off is the SECOND capture. This test caught that change the moment it was made.
+        local _t, off = line:match(probe_pat)
+        assert_eq(off, "-103.4")
+    end)
+end)
+
+describe("lib/vision -- shared last-seen tracker (v0.1.354)", function()
+    local Vision = require("lib.vision")
+    -- The lib OWNS its clock (reading GlobalVars.GetCurTime), so tests drive time by
+    -- replacing that stub rather than injecting a clock - no test-only API in production
+    -- code. Same idiom as the lib/defense modifier tests. The harness stub is restored at
+    -- the end of this block, since `describe` runs its body inline and later suites read it.
+    local function at(t) GlobalVars.GetCurTime = function() return t end end
+    local HERO, CREEP = { id = "hero" }, { id = "creep" }
+    local _vsav = { ih = NPC.IsHero, dm = Entity.IsDormant, ct = GlobalVars.GetCurTime }
+    local function with_engine(dormant_set)
+        NPC.IsHero = function(e) return e ~= CREEP end
+        Entity.IsDormant = function(e) return dormant_set[e] == true end
+    end
+
+    it("a hero going dormant is stamped, and Age grows with the clock", function()
+        local d = { [HERO] = true }
+        with_engine(d); at(100)
+        Vision.OnSetDormant_handler(HERO, 1)
+        at(106)
+        local a = Vision.Age(HERO)
+        assert_true(a ~= nil and math.abs(a - 6.0) < 1e-6, "expected 6.0, got " .. tostring(a))
+    end)
+
+    it("a VISIBLE hero reads age 0 regardless of any stamp", function()
+        local d = { [HERO] = true }
+        with_engine(d); at(100)
+        Vision.OnSetDormant_handler(HERO, 1)
+        d[HERO] = false                       -- came back into vision
+        at(200)
+        assert_eq(Vision.Age(HERO), 0)
+    end)
+
+    it("SAFETY VALVE: a never-observed hero returns nil so callers keep today's behaviour", function()
+        -- THE pin that makes a three-hero blast radius survivable. nil (not 0) lets each
+        -- consumer apply its own default; escape.lua's `or 0` then reproduces the exact
+        -- pre-vision behaviour. If this ever returns 0, an empty tracker would silently
+        -- become a real signal.
+        -- the real valve case: DORMANT (so we cannot see it) and never observed going
+        -- dormant, so there is no stamp. A hero that is merely VISIBLE is age 0, and that
+        -- is correct - the first draft of this test got that wrong and the pin caught it.
+        local UNSEEN = { id = "unseen" }
+        with_engine({ [UNSEEN] = true })
+        assert_true(Vision.Age(UNSEEN) == nil, "dormant + never observed must be nil, not 0")
+        local VIS = { id = "visible_unseen" }
+        with_engine({})
+        assert_eq(Vision.Age(VIS), 0, "a VISIBLE hero is age 0 even if never stamped")
+    end)
+
+    it("non-heroes are ignored (creeps enter and leave fog constantly)", function()
+        local d = { [CREEP] = true }
+        with_engine(d); at(100)
+        Vision.OnSetDormant_handler(CREEP, 1)
+        at(200)
+        assert_true(Vision.Age(CREEP) == nil, "a creep must never be tracked")
+    end)
+
+    it("the handler follows Entity.IsDormant, NOT the undocumented type enum", function()
+        -- OnSetDormant's `type` is an Enum.DormancyType the docs describe only as "the type
+        -- of change"; nothing states which value means entering dormancy. A nonsense type
+        -- must still stamp when IsDormant says dormant.
+        local d = { [HERO] = true }
+        with_engine(d); at(50)
+        Vision.OnSetDormant_handler(HERO, 999)
+        at(55)
+        local a = Vision.Age(HERO)
+        assert_true(a ~= nil and math.abs(a - 5.0) < 1e-6, "IsDormant decides, not type; got " .. tostring(a))
+    end)
+
+    it("Wire chains onto an existing handler and is idempotent per table", function()
+        local hits = 0
+        local cbs = { OnSetDormant = function() hits = hits + 1 end }
+        Vision.Wire(cbs); Vision.Wire(cbs)     -- the second call must not double-chain
+        with_engine({}); at(10)
+        cbs.OnSetDormant(HERO, 1)
+        assert_eq(hits, 1, "the pre-existing handler must run exactly once")
+    end)
+
+    it("Wire adds ONLY OnSetDormant - no marker field leaks into the callbacks table", function()
+        -- hero scripts do `for k, fn in pairs(callbacks) do callbacks[k] = wrap(fn) end` and
+        -- then hand the table to UCZone to register. A marker field would be wrapped as if
+        -- it were a callback and registered as one, so the wired-set lives inside the lib.
+        local cbs = {}
+        Vision.Wire(cbs)
+        local keys = {}
+        for k, v in pairs(cbs) do keys[#keys + 1] = k
+            assert_eq(type(v), "function", "every entry must be callable: " .. tostring(k)) end
+        assert_eq(#keys, 1, "exactly one key expected, got " .. #keys)
+        assert_eq(keys[1], "OnSetDormant")
+    end)
+
+    it("Stats reports events and records the observed type values", function()
+        local d = { [HERO] = true }
+        with_engine(d); at(10)
+        local before = Vision.Stats().events
+        Vision.OnSetDormant_handler(HERO, 7)
+        local s = Vision.Stats()
+        assert_eq(s.events, before + 1)
+        -- v0.1.355: the key is `<type>/<what Entity.IsDormant returned>`. The second half is
+        -- the whole point of the diagnostic - g354 showed events=584 / tracked=0, and only the
+        -- verbatim return distinguishes "the CNPC handle was rejected" (nil) from "it really
+        -- read not-dormant at handler time" (false).
+        assert_true(s.types["7/true"] ~= nil, "type AND the IsDormant return must be recorded")
+    end)
+
+    it("the IsDormant return is recorded verbatim: false and nil must not collapse", function()
+        -- THE g354 BUG SHAPE. `x and f(x) or nil` maps a `false` return to nil, which would
+        -- erase the one distinction the next log has to make. Both must survive to the key.
+        with_engine({ [HERO] = false }); at(10)          -- present, reads NOT dormant
+        Vision.OnSetDormant_handler(HERO, 3)
+        local saved = Entity.IsDormant
+        Entity.IsDormant = function() return nil end     -- the "handle rejected" shape
+        Vision.OnSetDormant_handler(HERO, 3)
+        Entity.IsDormant = saved
+        local s = Vision.Stats()
+        assert_true(s.types["3/false"] ~= nil, "a false return must record as false, not nil")
+        assert_true(s.types["3/nil"] ~= nil, "a nil return must record as nil, not false")
+    end)
+
+    -- restore every global this block overrode, for the suites that follow
+    NPC.IsHero, Entity.IsDormant = _vsav.ih, _vsav.dm
+    GlobalVars.GetCurTime = _vsav.ct or function() return 0 end
+end)
+
+describe("lib/escape -- FogSnapshot consumes lib/vision (v0.1.354)", function()
+    local Escape = require("lib.escape")
+    local Vision = require("lib.vision")
+    local ME    = { id = "me" }
+    local ENEMY = { id = "enemy" }
+    -- SAVE every global this block overrides. A previous draft replaced
+    -- Entity.GetAbsOrigin with a PLAIN TABLE and did not restore it, so a later geometry
+    -- test called :Distance2D on it and died - the type-boundary class, self-inflicted via
+    -- test pollution. Restored at the end of the block.
+    local _sav = { ga = Heroes.GetAll, tn = Entity.GetTeamNum, dm = Entity.IsDormant,
+                   ao = Entity.GetAbsOrigin, mh = Hero.GetLastMaphackPos,
+                   ih = NPC.IsHero, ct = GlobalVars.GetCurTime }
+
+    -- FogSnapshot's real dependency set, stubbed so the AGE PATH actually runs. The existing
+    -- suite only ever stubbed FogSnapshot itself, so this branch had no coverage at all -
+    -- which is part of why a dead getter sat in it unnoticed.
+    local function with_engine(dormant, now_t)
+        Heroes.GetAll        = function() return { ENEMY } end
+        Entity.GetTeamNum    = function(e) return e == ME and 2 or 3 end
+        Entity.IsDormant     = function(e) return e == ENEMY and dormant or false end
+        Entity.GetAbsOrigin  = function() return { x = 0, y = 0, z = 0 } end
+        Hero.GetLastMaphackPos = function() return { x = 100, y = 0, z = 0 } end
+        NPC.IsHero           = function() return true end
+        GlobalVars.GetCurTime = function() return now_t end
+    end
+
+    it("SAFETY VALVE end to end: an unobserved fogged enemy snapshots at age 0", function()
+        -- Vision.Age returns nil (never observed going dormant) -> escape's `or 0` -> age 0
+        -- -> probable_radius 0 -> full confidence. That is byte-for-byte the behaviour every
+        -- hero had BEFORE lib/vision existed, which is what makes shipping this to three
+        -- heroes at once survivable.
+        with_engine(true, 500)
+        local snap = Escape.FogSnapshot(ME, { max_ms = 550 })
+        assert_eq(#snap.heroes, 1)
+        assert_false(snap.heroes[1].visible)
+        assert_eq(snap.heroes[1].age, 0, "unobserved must read age 0, not a real age")
+        assert_eq(snap.heroes[1].probable_radius, 0)
+    end)
+
+    it("a TRACKED fogged enemy now snapshots with a REAL age and a grown disc", function()
+        -- the whole point of the arc: this was impossible before, because
+        -- Hero.GetLastVisibleTime returned nil on 405/405 reads.
+        with_engine(true, 100)
+        Vision.OnSetDormant_handler(ENEMY, 1)      -- stamped at t=100
+        with_engine(true, 104)                     -- 4s later, still fogged
+        local snap = Escape.FogSnapshot(ME, { max_ms = 550 })
+        assert_eq(#snap.heroes, 1)
+        assert_true(math.abs(snap.heroes[1].age - 4.0) < 1e-6,
+            "expected age 4.0, got " .. tostring(snap.heroes[1].age))
+        assert_true(math.abs(snap.heroes[1].probable_radius - 4.0 * 550) < 1e-6,
+            "the probable disc must grow with the real age")
+    end)
+
+    it("a VISIBLE enemy is age 0 with no disc, whatever the tracker holds", function()
+        with_engine(false, 900)                    -- back in vision, stamp from the test above
+        local snap = Escape.FogSnapshot(ME, { max_ms = 550 })
+        assert_true(snap.heroes[1].visible)
+        assert_eq(snap.heroes[1].age, 0)
+        assert_eq(snap.heroes[1].probable_radius, 0)
+    end)
+
+    -- restore EVERY override, or the next suite inherits plain-table origins
+    Heroes.GetAll, Entity.GetTeamNum, Entity.IsDormant = _sav.ga, _sav.tn, _sav.dm
+    Entity.GetAbsOrigin, Hero.GetLastMaphackPos, NPC.IsHero = _sav.ao, _sav.mh, _sav.ih
+    GlobalVars.GetCurTime = _sav.ct or function() return 0 end
+end)
+
+describe("lib/defense -- modifier remaining-time reads (v0.1.352 phantom-API fix)", function()
+    -- NPC.GetModifierRemaining DOES NOT EXIST in the UCZone API. The documented path is
+    -- NPC.GetModifier -> Modifier.GetDieTime, differenced against GameRules.GetGameTime.
+    -- These pins did not exist before: the whole resolver family had ZERO coverage, which
+    -- is why a call to a non-existent function survived unnoticed.
+    local Defense = require("lib.defense")
+    local UNIT = { id = "unit" }
+
+    -- install a fake engine for the modifier path; returns a restore function
+    local function with_engine(die_time, game_time, has_mod)
+        local oldNPCget, oldMod, oldGR = NPC.GetModifier, Modifier, GameRules
+        NPC.GetModifier = function(_, _) return (has_mod ~= false) and { m = true } or nil end
+        Modifier = { GetDieTime = function(_) return die_time end }
+        GameRules = { GetGameTime = function() return game_time end }
+        return function() NPC.GetModifier, Modifier, GameRules = oldNPCget, oldMod, oldGR end
+    end
+
+    it("Remaining returns the REAL remaining seconds, not the floor", function()
+        local restore = with_engine(107.5, 100.0)          -- 7.5s left
+        local r = Defense.EtaResolvers.Remaining("modifier_bane_fiends_grip", nil, 0.1)
+        local v = r(nil, UNIT, nil, nil, 0)
+        restore()
+        assert_true(math.abs(v - 7.5) < 1e-6, "expected 7.5, got " .. tostring(v))
+    end)
+
+    it("Remaining still honours cap_s and floor_s around the real read", function()
+        local restore = with_engine(110.0, 100.0)          -- 10s left
+        local capped = Defense.EtaResolvers.Remaining("m", 2.0, 0.1)(nil, UNIT, nil, nil, 0)
+        restore()
+        assert_true(math.abs(capped - 2.0) < 1e-6, "cap_s must clamp the real read")
+        local restore2 = with_engine(100.01, 100.0)        -- 0.01s left
+        local floored = Defense.EtaResolvers.Remaining("m", nil, 0.5)(nil, UNIT, nil, nil, 0)
+        restore2()
+        assert_true(math.abs(floored - 0.5) < 1e-6, "floor_s must still apply")
+    end)
+
+    it("a missing modifier falls back to the floor (unchanged behaviour)", function()
+        local restore = with_engine(107.5, 100.0, false)   -- GetModifier returns nil
+        local v = Defense.EtaResolvers.Remaining("m", nil, 0.5)(nil, UNIT, nil, nil, 0)
+        restore()
+        assert_true(math.abs(v - 0.5) < 1e-6, "no modifier: floor, never a guess")
+    end)
+
+    it("a CLOCK MISMATCH degrades to the floor instead of inventing a long lock", function()
+        -- the fog-age bug in this codebase was exactly a cross-clock subtraction; a die time
+        -- on one clock minus a now on another yields nonsense. Both directions must be refused.
+        local neg = with_engine(90.0, 100.0)               -- already expired -> negative
+        local v1 = Defense.EtaResolvers.Remaining("m", nil, 0.5)(nil, UNIT, nil, nil, 0)
+        neg()
+        assert_true(math.abs(v1 - 0.5) < 1e-6, "negative remaining must not pass through")
+        local huge = with_engine(1000.0, 100.0)            -- 900s: a pregame-offset style mismatch
+        local v2 = Defense.EtaResolvers.Remaining("m", nil, 0.5)(nil, UNIT, nil, nil, 0)
+        huge()
+        assert_true(math.abs(v2 - 0.5) < 1e-6, "an implausible remaining must not become the lock")
+    end)
+
+    it("no Modifier/GameRules bindings at all: floor, no crash", function()
+        local oldMod, oldGR, oldGet = Modifier, GameRules, NPC.GetModifier
+        Modifier, GameRules, NPC.GetModifier = nil, nil, nil
+        local ok, v = pcall(function()
+            return Defense.EtaResolvers.Remaining("m", nil, 0.5)(nil, UNIT, nil, nil, 0)
+        end)
+        Modifier, GameRules, NPC.GetModifier = oldMod, oldGR, oldGet
+        assert_true(ok, "an absent modifier API must never throw")
+        assert_true(math.abs(v - 0.5) < 1e-6, "absent API: floor")
+    end)
+
+    it("the generic resolver's no-catalog arm reads the real remaining, capped by lock_cap_s", function()
+        local TD = { THREAT_ARRIVAL_TIMING = {} }          -- no catalog entry: the 168-modifier path
+        local restore = with_engine(105.0, 100.0)          -- 5s left, lock_cap_s default 1.7
+        local v = Defense.MakeGenericEtaResolver(TD)(nil, UNIT, nil, nil, 0, "modifier_x")
+        restore()
+        assert_true(math.abs(v - 1.7) < 1e-6, "expected the 1.7 cap, got " .. tostring(v))
+    end)
+
+    it("an EXPIRED modifier reads as unreadable, not as a tiny lock (pins the rem<=0 guard)", function()
+        -- without the lower guard a negative remaining reaches site 1 and is silently
+        -- floored, and site 3 returns 0.1 instead of nil - both look plausible in a log.
+        local TD = { THREAT_ARRIVAL_TIMING = {} }
+        local restore = with_engine(95.0, 100.0)           -- died 5s ago
+        local v = Defense.MakeGenericEtaResolver(TD)(nil, UNIT, nil, nil, 0, "modifier_x")
+        restore()
+        assert_true(v == nil, "an expired modifier must yield nil, got " .. tostring(v))
+    end)
+
+    it("NaN is refused by the sanity band (it passes every comparison)", function()
+        -- NaN <= 0 and NaN > MAX are BOTH false, so a subtraction-form guard would let it
+        -- through; it then propagates through clamp_ttl into a lock that never expires.
+        local TD = { THREAT_ARRIVAL_TIMING = {} }
+        local restore = with_engine(0 / 0, 100.0)
+        local v = Defense.MakeGenericEtaResolver(TD)(nil, UNIT, nil, nil, 0, "modifier_x")
+        restore()
+        assert_true(v == nil, "NaN must be refused, got " .. tostring(v))
+        local restore2 = with_engine(0 / 0, 100.0)
+        local v2 = Defense.EtaResolvers.Remaining("m", nil, 0.5)(nil, UNIT, nil, nil, 0)
+        restore2()
+        assert_true(v2 == 0.5, "NaN at site 1 must floor, got " .. tostring(v2))
+    end)
+
+    it("the generic resolver returns nil (-> caller's fallback) when the read is unavailable", function()
+        local TD = { THREAT_ARRIVAL_TIMING = {} }
+        local restore = with_engine(105.0, 100.0, false)   -- no modifier on the unit
+        local v = Defense.MakeGenericEtaResolver(TD)(nil, UNIT, nil, nil, 0, "modifier_x")
+        restore()
+        assert_true(v == nil, "unreadable must stay nil so resolve_ttl uses fallback_lock_ttl_s")
+    end)
+
+    it("channel_at_caster reads the CASTER side, and falls through to cast_point when unreadable", function()
+        local TD = { THREAT_ARRIVAL_TIMING = { modifier_x = { kind = "channel_at_caster", cast_point = 0.4 } } }
+        local restore = with_engine(101.0, 100.0)          -- 1.0s left on the caster
+        local v = Defense.MakeGenericEtaResolver(TD)(UNIT, nil, nil, nil, 0, "modifier_x")
+        restore()
+        assert_true(math.abs(v - 1.0) < 1e-6, "caster-side remaining wins, got " .. tostring(v))
+        local restore2 = with_engine(101.0, 100.0, false)  -- unreadable -> cast_point arm
+        local v2 = Defense.MakeGenericEtaResolver(TD)(UNIT, nil, nil, nil, 0, "modifier_x")
+        restore2()
+        assert_true(math.abs(v2 - 0.4) < 1e-6, "must fall through to cast_point, got " .. tostring(v2))
+    end)
+end)
+
 describe("SAVE_KIND dispel vocabulary", function()
     local TD = require("lib.threat_data")
     it("strong-dispel items carry dispel_strong, not dispel_basic", function()
@@ -3645,7 +4579,11 @@ describe("migration correctness (42 known threats)", function()
         ["modifier_winter_wyvern_winters_curse"] = { "invuln", "reflect_target" },
         ["modifier_witch_doctor_maledict"] = { "magic_immune", "magic_barrier", "magic_resist" },
     }
-    for mod, want in pairs(EXPECT) do
+    local mods = {}                       -- sorted: pairs() order is unspecified, so registering
+    for mod in pairs(EXPECT) do mods[#mods + 1] = mod end   -- straight off the hash made the
+    table.sort(mods)                      -- suite's OUTPUT ORDER vary run to run (not diffable)
+    for _, mod in ipairs(mods) do
+        local want = EXPECT[mod]
         it("derives correct set for "..mod, function()
             local prof = TD.THREAT_PROFILE[mod]
             assert_true(prof ~= nil, "no profile for "..mod)
@@ -3814,17 +4752,7 @@ describe("lib/farm , valuation GoldValue/EffectiveHP (R3/R4)", function()
     it("EffectiveHP nil-safe", function() assert_eq(Farm.EffectiveHP(nil), 0) end)
 end)
 
-describe("lib/farm , CanClear (R3)", function()
-    it("clearable when budget >= summed hp", function()
-        assert_true(Farm.CanClear({ {hp=300}, {hp=300} }, 600))
-    end)
-    it("not clearable when budget < summed hp", function()
-        assert_false(Farm.CanClear({ {hp=300}, {hp=400} }, 600))
-    end)
-    it("empty camp trivially clearable", function() assert_true(Farm.CanClear({}, 0)) end)
-    it("nil budget cannot clear non-empty", function()
-        assert_false(Farm.CanClear({ {hp=1} }, nil))
-    end)
+describe("lib/farm , ClearBudget (R3)", function()
     it("ClearBudget: 1-stack ehp keeps the validated base count", function()
         assert_eq(Farm.ClearBudget(4, 1000, 960), 4)   -- need ceil(1.04)=2 < base 4
     end)
@@ -3835,25 +4763,6 @@ describe("lib/farm , CanClear (R3)", function()
         assert_eq(Farm.ClearBudget(3, 0, 960), 3)
         assert_eq(Farm.ClearBudget(3, 1000, 0), 3)
     end)
-end)
-
-describe("lib/farm , ScoreTarget (R4)", function()
-    it("more gold per time scores higher", function()
-        assert_true(Farm.ScoreTarget({gold=200,time=10}) > Farm.ScoreTarget({gold=200,time=20}))
-    end)
-    it("a fat far camp can beat a thin near wave", function()
-        assert_true(Farm.ScoreTarget({gold=300,time=12}) > Farm.ScoreTarget({gold=160,time=8}))
-    end)
-    it("risk reduces score by risk*risk_weight", function()
-        local safe  = Farm.ScoreTarget({gold=100,time=10,risk=0})
-        local risky = Farm.ScoreTarget({gold=100,time=10,risk=1,risk_weight=4})
-        assert_eq(safe - risky, 4)
-    end)
-    it("zero time does not divide by zero", function()
-        local s = Farm.ScoreTarget({gold=100,time=0})
-        assert_true(s > 0 and s == s)
-    end)
-    it("nil opts is 0", function() assert_eq(Farm.ScoreTarget(nil), 0) end)
 end)
 
 describe("lib/farm , IsContestedByAlly (R2)", function()
@@ -3919,18 +4828,6 @@ describe("lib/farm -- CrashCast (geometry; condensed from lib/shove)", function(
             { standback = 900, fountain = { x = -500, y = 0 } })
         assert_true(near(r.stand.x, -500, 1), "clamped to 500")
     end)
-    it("perp is perpendicular to the creep line", function()
-        local dir = { x = 3, y = 4 }
-        local r = Farm.CrashCast({ x = 0, y = 0 }, dir, { fountain = { x = -1000, y = 0 } })
-        local dot = r.perp.x * dir.x + r.perp.y * dir.y
-        assert_true(math.abs(dot) <= 1e-6, "perp . dir ~ 0")
-        assert_true(near(r.perp.x * r.perp.x + r.perp.y * r.perp.y, 1, 1e-6), "perp is unit")
-    end)
-    it("degenerate creep dir -> perp zero, no NaN", function()
-        local r = Farm.CrashCast({ x = 10, y = 10 }, { x = 0, y = 0 }, { fountain = { x = 0, y = 0 } })
-        assert_eq(r.perp.x, 0); assert_eq(r.perp.y, 0)
-        assert_true(r.cast_point.x == r.cast_point.x, "cast_point.x not NaN")
-    end)
 end)
 
 describe("lib/schedule -- ClearTime (hybrid)", function()
@@ -3985,6 +4882,29 @@ describe("lib/schedule -- NextWaveArrival", function()
     it("early game now < phase -> the first grid point", function()
         assert_eq(Schedule.NextWaveArrival(5, 30, 22, nil), 22)
     end)
+    -- v0.1.366: THE INVARIANT THE LANE CLOCK NOW RESTS ON. Tinker stamps State.laneWaveT with
+    -- `NextOnGrid(now, P, ph) - P` (the most recent grid tick) instead of a hero-derived time.
+    -- NextWaveArrival consumes the stamp as a PHASE, so the stamp's phase MUST equal K.WAVE_PHASE
+    -- at every `now` - that identity is what makes the fresh branch and the fallback branch agree
+    -- and stops a hero-derived phase entering the wave clock. If this breaks, the clock silently
+    -- goes back to being stamped by where Tinker happened to be standing.
+    it("the grid-aligned stamp carries EXACTLY the calibrated phase, at every now", function()
+        local P, PH = 30, 21
+        for now = 0, 300, 0.7 do
+            local stamp = Schedule.NextOnGrid(now, P, PH) - P
+            assert_true(math.abs(stamp % P - PH) < 1e-9,
+                string.format("stamp phase %.3f ~= %d at now=%.1f", stamp % P, PH, now))
+            assert_true(stamp <= now, "the stamp is the most recent tick, never a future one")
+            assert_true(now - stamp < P, "and never more than one period stale, so it stays 'fresh'")
+        end
+    end)
+    it("a grid-aligned stamp makes the fresh branch agree with the WAVE_PHASE fallback", function()
+        local P, PH = 30, 21
+        for now = 0, 300, 1.3 do
+            local stamp = Schedule.NextOnGrid(now, P, PH) - P
+            assert_eq(Schedule.NextWaveArrival(now, P, PH, stamp), Schedule.NextWaveArrival(now, P, PH, nil))
+        end
+    end)
 end)
 
 describe("lib/schedule -- Plan (cycle decision)", function()
@@ -4010,6 +4930,55 @@ describe("lib/schedule -- Plan (cycle decision)", function()
     it("not safe -> recover (takes precedence)", function()
         local d = Schedule.Plan(base({ wave = { arrival = 130, eff_hp = 450 }, mana = 100, safe = false }))
         assert_eq(d.action, "recover"); assert_eq(d.reason, "unsafe")
+    end)
+
+    -- ---- v0.1.360 lane-phase full-clear top-up (shove_cost_full) ----
+    -- Two Marches clear a wave; one leaks creeps. With time in hand, top up rather than jungle so
+    -- the wave is cleared in two. Every assertion below is written to FAIL if the term is removed
+    -- or if the branch is moved above the due-wave arm.
+    it("v0.1.360 slack + cannot fund the FULL clear + refill fits -> recover/mana (top up now)", function()
+        local d = Schedule.Plan(base({ wave = { arrival = 130, eff_hp = 450 },
+                                       mana = 300, shove_cost_full = 500, recover_s = 20 }))
+        assert_eq(d.action, "recover"); assert_eq(d.reason, "mana")
+        assert_true(d.recover_fits, "26s slack >= 20s round trip")
+    end)
+    it("v0.1.360 the refill must FIT the slack, else keep jungling", function()
+        local d = Schedule.Plan(base({ wave = { arrival = 130, eff_hp = 450 },
+                                       mana = 300, shove_cost_full = 500, recover_s = 40 }))
+        assert_eq(d.action, "jungle"); assert_eq(d.reason, "slack")
+    end)
+    it("v0.1.360 A DUE WAVE IS NEVER ABANDONED for the full-clear price", function()
+        -- the load-bearing one. A shove verdict is only ever reached at slack <= 0, so refusing it
+        -- for mana cannot buy a refill that arrives in time - it just loses the wave. Half-clearing
+        -- banks 3 of 4 last hits (the v0.1.200 argument), and that must survive inside lane phase.
+        local d = Schedule.Plan(base({ wave = { arrival = 100, eff_hp = 450 },
+                                       mana = 300, shove_cost_full = 500, recover_s = 1 }))
+        assert_eq(d.action, "shove"); assert_eq(d.reason, "due")
+    end)
+    it("v0.1.360 funded for the full clear -> unchanged jungle/slack", function()
+        local d = Schedule.Plan(base({ wave = { arrival = 130, eff_hp = 450 },
+                                       mana = 600, shove_cost_full = 500, recover_s = 20 }))
+        assert_eq(d.action, "jungle"); assert_eq(d.reason, "slack")
+    end)
+    it("v0.1.360 nil shove_cost_full (deep era / pre-Rearm) -> byte-identical to v0.1.359", function()
+        -- the hero fills shove_cost_full ONLY while the enemy mid T1 stands and Rearm level >= 1,
+        -- so the deep era and the pre-ultimate game must be untouched.
+        local d = Schedule.Plan(base({ wave = { arrival = 130, eff_hp = 450 }, mana = 300, recover_s = 20 }))
+        assert_eq(d.action, "jungle"); assert_eq(d.reason, "slack")
+    end)
+    it("v0.1.360 a DEFEND is never dropped for the full-clear price", function()
+        -- reason=="mana" is one of three verdicts defend_crash may not override (v0.1.337), so
+        -- without the exemption a wave crashing OUR tower would vanish at fundable mana.
+        local d = Schedule.Plan(base({ wave = { arrival = 130, eff_hp = 450 },
+                                       mana = 300, shove_cost_full = 500, recover_s = 20,
+                                       defend_crash = true }))
+        assert_eq(d.action, "shove"); assert_eq(d.reason, "defend_crash")
+    end)
+    it("v0.1.360 the one-hop mana verdict still outranks it", function()
+        local d = Schedule.Plan(base({ wave = { arrival = 130, eff_hp = 450 },
+                                       mana = 100, shove_cost = 200, shove_cost_full = 500, recover_s = 20 }))
+        assert_eq(d.action, "recover"); assert_eq(d.reason, "mana")
+        assert_true(math.abs(d.mana_at_leave_by - 100) < 1e-9, "regen 0: the OLD gate fired, not the new one")
     end)
     it("leave_by + casts passed through", function()
         local d = Schedule.Plan(base({ wave = { arrival = 130, eff_hp = 250 } }))
@@ -4056,6 +5025,26 @@ describe("lib/schedule -- Plan (cycle decision)", function()
                                        filler = { min_camp_slack = 10, min_fountain_slack = 6 } }))
         assert_eq(d.action, "jungle"); assert_eq(d.reason, "thin_wave", "no near_due resurrection")
     end)
+    it("INVARIANT (BUG-1) actually pins its guard: a VETOED jungle cannot convert via suppressed", function()
+        -- MUTATION-DRIVEN. The sibling BUG-1 test above STILL PASSES when the
+        -- `reason == "slack"` guard is deleted from lib/schedule.lua, because its near_due
+        -- path re-runs shove_vetoes and is vetoed straight back to thin_wave: the invariant
+        -- holds there by a DIFFERENT mechanism, leaving the guard itself unpinned. The
+        -- SUPPRESSED branch has no second veto, so that is where the guard is load bearing.
+        -- SUBTLETY that made this easy to miss: slack must be <= 0, or the initial action is
+        -- already jungle/slack, shove_vetoes early-returns (it only runs when the action is
+        -- "shove"), and the guard passes legitimately instead of blocking.
+        local d = Schedule.Plan(base({ wave = { arrival = 103, eff_hp = 300, visible = true }, thin_ehp = 400,
+                                       suppressed = true,
+                                       filler = { min_camp_slack = 10, min_fountain_slack = 6 } }))
+        assert_eq(d.action, "jungle", "a THIN-vetoed jungle must not convert to recover")
+        assert_eq(d.reason, "thin_wave", "the veto reason must survive the filler")
+        -- and the guard must not OVER-block: a genuine slack-jungle still converts
+        local d2 = Schedule.Plan(base({ wave = { arrival = 110, eff_hp = 450 }, suppressed = true,
+                                        filler = { min_camp_slack = 10, min_fountain_slack = 6 } }))
+        assert_eq(d2.action, "recover", "a GENUINE slack-jungle must still convert")
+        assert_eq(d2.reason, "shove_stuck")
+    end)
     it("filler: a genuine tight slack-jungle converts (recharge when needed+fits, else near_due)", function()
         local c = base({ wave = { arrival = 110, eff_hp = 450 } })     -- leave_by=106; slack=6; 6-3=3 < 10
         c.filler = { min_camp_slack = 10, min_fountain_slack = 6, need_recharge = true }
@@ -4093,6 +5082,22 @@ describe("lib/schedule -- Plan (cycle decision)", function()
         assert_eq(d.action, "shove"); assert_eq(d.reason, "defend_crash")
         d = Schedule.Plan(base({ wave = { arrival = 100, eff_hp = 450 }, safe = false, defend_crash = true }))
         assert_eq(d.action, "recover"); assert_eq(d.reason, "unsafe", "never forced into a gank")
+    end)
+    it("defend_crash never overrides the mana verdict (v0.1.337, the g337 240-mana raid)", function()
+        local d = Schedule.Plan(base({ wave = { arrival = 100, eff_hp = 450 },
+                                       mana = 100, defend_crash = true }))
+        assert_eq(d.action, "recover"); assert_eq(d.reason, "mana", "an unfundable defense recovers first")
+    end)
+    it("defend_crash never dispatches below the hp bar (v0.1.337.1, case-file #2 both halves)", function()
+        local d = Schedule.Plan(base({ wave = { arrival = 100, eff_hp = 450 },
+                                       hp_frac = 0.35, min_hp_frac = 0.50, defend_crash = true }))
+        assert_eq(d.action, "recover"); assert_eq(d.reason, "low_hp", "the due-shove flip-back half")
+        d = Schedule.Plan(base({ wave = { arrival = 130, eff_hp = 450 },
+                                 hp_frac = 0.35, min_hp_frac = 0.50, defend_crash = true }))
+        assert_eq(d.action, "jungle", "the slack-verdict half: defend must not force a shove under the bar")
+        d = Schedule.Plan(base({ wave = { arrival = 130, eff_hp = 450 },
+                                 hp_frac = 0.80, min_hp_frac = 0.50, defend_crash = true }))
+        assert_eq(d.action, "shove"); assert_eq(d.reason, "defend_crash", "healthy hp defends as before")
     end)
     it("LAW (v0.1.78-83 graveyard): the deadline is ALWAYS the current wave - no defer path exists", function()
         for _, over in ipairs({ {}, { covers = false }, { bal = -9, bal_min = -2 } }) do
@@ -4184,33 +5189,6 @@ describe("lib/schedule -- SeqFits (ability/channel sequence fitting)", function(
     it("empty sequence always fits, start_by = deadline", function()
         local r = Schedule.SeqFits({}, 50, 10)
         assert_true(r.fits); assert_eq(r.start_by, 50)
-    end)
-end)
-
-describe("lib/farm -- neutral camps + stacking + dps clear (future-hero additions)", function()
-    it("NEUTRAL_STATS carries the 4 tiers with the verified representative stats", function()
-        assert_eq(Farm.NEUTRAL_STATS[0].armor, 0)          -- kobold
-        assert_eq(Farm.NEUTRAL_STATS[1].mr, 0.30)          -- mud golem 30% MR
-        assert_eq(Farm.NEUTRAL_STATS[2].armor, 4)          -- hellbear smasher
-        assert_eq(Farm.NEUTRAL_STATS[3].hp, 2000)          -- ancient black dragon
-    end)
-    it("CampCombatants builds SimFight-ready records; an ancient camp beats a small camp", function()
-        local small, anc = Farm.CampCombatants(0), Farm.CampCombatants(3)
-        assert_eq(#anc, Farm.NEUTRAL_STATS[3].n)
-        assert_eq(anc[1].armor, 4); assert_eq(anc[1].atype, "basic")
-        local f = Lane.SimFight(small, anc, { dt = 0.25 })
-        assert_eq(f.winner, "b", "ancients out-attrition kobolds")
-    end)
-    it("ClearTimeDPS applies the armor formula; zero dps -> huge", function()
-        local t = Farm.ClearTimeDPS(1900, 100, 4)          -- mult = 1 - 0.24/1.24 = 0.8065
-        assert_true(math.abs(t - 23.56) < 0.1, "1900 / (100*0.8065)")
-        assert_true(Farm.ClearTimeDPS(1000, 0) == math.huge)
-    end)
-    it("StackWindow: next :00 spawn, pull = spawn - lead, rolls when the pull passed", function()
-        local w = Farm.StackWindow(100, 6)
-        assert_eq(w.spawn_at, 120); assert_eq(w.pull_at, 114)
-        w = Farm.StackWindow(115, 6)                       -- 114 already passed -> next minute
-        assert_eq(w.spawn_at, 180); assert_eq(w.pull_at, 174)
     end)
 end)
 
@@ -4610,6 +5588,268 @@ describe("lib/march_sim -- attrition sim (W-GEOM-2)", function()
         assert_true(ranged_of(x20).died_at == nil, "narrow X20: shadows aligned, ranged survives")
         local wide = run({ { t = 0, theta = 45 }, { t = 3.5, theta = -90 } })
         assert_true(ranged_of(wide).died_at ~= nil, "wide X 45/-90: shadows decorrelated, ranged dies")
+    end)
+end)
+
+describe("lib/farm , observed-farmer camp clearing (v0.1.332, sustained per-hero dwell v0.1.349)", function()
+    local C = { { key = "10,10", cx = 1000, cy = 1000 }, { key = "20,20", cx = 2000, cy = 2000 } }
+    -- window = the max GAP that keeps ONE hero's sighting run unbroken; min_dwell =
+    -- the CONTINUOUS presence that means farming. The gap alone confirmed nothing
+    -- but "somebody was seen twice", which both a single walk-through (2 scans while
+    -- crossing the 1200u circle) and a RELAY of heroes satisfy - hence per-hero runs.
+    local OPT = function(t) return { radius = 600, window = 4.0, min_dwell = 6.0, now = t } end
+    local function H(id, x, y) return { id = id, x = x, y = y } end
+    -- drive one hero's sighting run at the given times; returns the marks of the LAST call
+    local function run_at(dwell, pt, camps, times)
+        local m
+        for _, t in ipairs(times) do
+            m = Farm.ObservedFarmers({ pt }, camps, dwell, OPT(t))
+        end
+        return m
+    end
+
+    it("one sighting never marks (walk-through)", function()
+        local dwell = {}
+        local m = Farm.ObservedFarmers({ H("A", 1100, 1000) }, C, dwell, OPT(10))
+        assert_eq(#m, 0)
+        assert_eq(dwell["10,10"].first, 10)
+        assert_eq(dwell["10,10"].last, 10)
+        assert_eq(dwell["10,10"].who, "A")
+    end)
+
+    it("two sightings 2s apart do NOT confirm (THE walk-through, g349)", function()
+        local dwell = {}
+        Farm.ObservedFarmers({ H("A", 1100, 1000) }, C, dwell, OPT(10))
+        local m = Farm.ObservedFarmers({ H("A", 1050, 1000) }, C, dwell, OPT(12))
+        assert_eq(#m, 0)
+        assert_eq(dwell["10,10"].first, 10)   -- the run continued, it did not restart
+        assert_eq(dwell["10,10"].last, 12)
+    end)
+
+    it("min_dwell of continuous presence confirms", function()
+        local dwell = {}
+        local m = run_at(dwell, H("A", 1100, 1000), C, { 10, 12, 14, 16 })
+        assert_eq(#m, 1)
+        assert_eq(m[1], "10,10")
+    end)
+
+    it("a gap wider than the window restarts the dwell clock", function()
+        local dwell = {}
+        run_at(dwell, H("A", 1100, 1000), C, { 10, 12, 14 })      -- 4s of dwell, not yet enough
+        local m = Farm.ObservedFarmers({ H("A", 1100, 1000) }, C, dwell, OPT(20))   -- gap 6 > 4
+        assert_eq(#m, 0)
+        assert_eq(dwell["10,10"].first, 20)   -- run restarted, the earlier 4s does not carry
+        local m2 = run_at(dwell, H("A", 1100, 1000), C, { 22, 24 })                 -- only 4s again
+        assert_eq(#m2, 0)
+        local m3 = Farm.ObservedFarmers({ H("A", 1100, 1000) }, C, dwell, OPT(26))
+        assert_eq(#m3, 1)
+    end)
+
+    it("confirming RETIRES the run, so no latch can go stale across the respawn", function()
+        local dwell = {}
+        local m = run_at(dwell, H("A", 1100, 1000), C, { 0, 2, 4, 6 })
+        assert_eq(#m, 1)
+        assert_true(dwell["10,10"] == nil)    -- no {marked} latch survives the confirm
+        local m2 = run_at(dwell, H("A", 1100, 1000), C, { 8, 10, 12 })
+        assert_eq(#m2, 0)                     -- the fresh run must earn min_dwell again
+        local m3 = Farm.ObservedFarmers({ H("A", 1100, 1000) }, C, dwell, OPT(14))
+        assert_eq(#m3, 1)                     -- a camp farmed past its respawn re-confirms (v0.1.332 intent)
+    end)
+
+    it("a RELAY of heroes never confirms, overlapping crossings (v0.1.349 review)", function()
+        local dwell = {}
+        local A, B = H("A", 1100, 1000), H("B", 1100, 1000)
+        Farm.ObservedFarmers({ A }, C, dwell, OPT(0))            -- A inside [0,4]
+        Farm.ObservedFarmers({ A, B }, C, dwell, OPT(2))         -- B enters [2,6]
+        Farm.ObservedFarmers({ A, B }, C, dwell, OPT(4))
+        local m = Farm.ObservedFarmers({ B }, C, dwell, OPT(6))  -- A has left
+        assert_eq(#m, 0)                      -- neither hero was present for 6s
+        assert_eq(dwell["10,10"].who, "B")    -- the run restarted on the new owner
+        assert_eq(dwell["10,10"].first, 6)
+    end)
+
+    it("a RELAY separated by an empty scan never confirms (v0.1.349 review)", function()
+        local dwell = {}
+        run_at(dwell, H("A", 1100, 1000), C, { 0, 2, 4 })
+        Farm.ObservedFarmers({}, C, dwell, OPT(6))               -- nobody: an empty scan must not extend a run
+        local m = Farm.ObservedFarmers({ H("B", 1100, 1000) }, C, dwell, OPT(8))
+        assert_eq(#m, 0)                      -- B arriving 4s later must not inherit A's 4s
+        assert_eq(dwell["10,10"].who, "B")
+        assert_eq(dwell["10,10"].first, 8)
+    end)
+
+    it("a passer-by does not restart the resident's run", function()
+        local dwell = {}
+        local A = H("A", 1100, 1000)
+        Farm.ObservedFarmers({ A }, C, dwell, OPT(0))
+        -- B is listed FIRST, so a naive first-match would hand the run to the passer-by
+        Farm.ObservedFarmers({ H("B", 1000, 1000), A }, C, dwell, OPT(2))
+        Farm.ObservedFarmers({ H("B", 1000, 1000), A }, C, dwell, OPT(4))
+        local m = Farm.ObservedFarmers({ A }, C, dwell, OPT(6))
+        assert_eq(#m, 1)                      -- A's 6s run is intact
+        assert_eq(m[1], "10,10")
+    end)
+
+    it("radius is a hard edge", function()
+        local dwell = {}
+        local m = run_at(dwell, H("A", 1000, 1601), C, { 10, 12, 14, 16 })
+        assert_eq(#m, 0)
+        assert_true(dwell["10,10"] == nil)
+        local m3 = run_at(dwell, H("A", 1000, 1600), C, { 20, 22, 24, 26 })
+        assert_eq(#m3, 1)
+    end)
+
+    it("same-tick and regressed-clock sightings restart the run (dt > 0)", function()
+        local dwell = {}
+        local A = H("A", 1100, 1000)
+        run_at(dwell, A, C, { 10, 12 })                          -- an ESTABLISHED run, so the branch matters
+        local m = Farm.ObservedFarmers({ A }, C, dwell, OPT(12))
+        assert_eq(#m, 0)
+        assert_eq(dwell["10,10"].first, 12)   -- same tick restarts; under dt >= 0 first would stay 10
+        local m2 = Farm.ObservedFarmers({ A }, C, dwell, OPT(8))
+        assert_eq(#m2, 0)
+        assert_eq(dwell["10,10"].first, 8)    -- the regressed clock starts a fresh run
+    end)
+
+    it("a hero within radius of two camps confirms both", function()
+        local near = { { key = "a", cx = 0, cy = 0 }, { key = "b", cx = 800, cy = 0 } }
+        local dwell = {}
+        local m = run_at(dwell, H("A", 400, 0), near, { 1, 3, 5, 7 })
+        assert_eq(#m, 2)
+    end)
+
+    it("min_dwell 0 restores the pre-v0.1.349 confirm threshold", function()
+        local dwell = {}
+        local O = function(t) return { radius = 600, window = 4.0, min_dwell = 0, now = t } end
+        local A = H("A", 1100, 1000)
+        Farm.ObservedFarmers({ A }, C, dwell, O(10))
+        local m = Farm.ObservedFarmers({ A }, C, dwell, O(12))
+        assert_eq(#m, 1)
+    end)
+
+    it("no heroes means no dwell writes", function()
+        local dwell = {}
+        local m = Farm.ObservedFarmers({}, C, dwell, OPT(10))
+        assert_eq(#m, 0)
+        assert_true(next(dwell) == nil)
+    end)
+end)
+
+describe("lib/farm , jungle-aware lane contest (v0.1.333)", function()
+    local CAMPS = { { x = 4000, y = -5100 }, { x = 4700, y = -4000 } }
+    local CRASH = { x = 5565, y = -4310 }
+    local function core(x, y) return { pos = { x = x, y = y }, value = 1, core = true } end
+
+    it("core at an adjacent camp within jungle_r contests as jungle (the g332 t=425.9 case)", function()
+        local c, why = Farm.IsContestedByAlly(CRASH, { core(4000, -5100) },
+            { radius = 1200, camps = CAMPS, jungle_r = 2600 })
+        assert_true(c)
+        assert_eq(why, "jungle")
+    end)
+
+    it("no camps opt = old semantics (back-compat)", function()
+        local c = Farm.IsContestedByAlly(CRASH, { core(4000, -5100) }, { radius = 1200 })
+        assert_false(c)
+    end)
+
+    it("on-wave core still contests, branch = wave", function()
+        local c, why = Farm.IsContestedByAlly(CRASH, { core(5400, -4300) },
+            { radius = 1200, camps = CAMPS, jungle_r = 2600 })
+        assert_true(c)
+        assert_eq(why, "wave")
+    end)
+
+    it("core at a camp beyond jungle_r of the crash does not contest", function()
+        local far_crash = { x = 6800, y = -1200 }
+        local c = Farm.IsContestedByAlly(far_crash, { core(4000, -5100) },
+            { radius = 1200, camps = CAMPS, jungle_r = 2600 })
+        assert_false(c)
+    end)
+
+    it("core in transit (near neither wave nor any camp) does not contest", function()
+        local c = Farm.IsContestedByAlly(CRASH, { core(3200, -4550) },
+            { radius = 1200, camps = CAMPS, jungle_r = 2600 })
+        assert_false(c)
+    end)
+end)
+
+describe("lib/timing , arrival watchdog (v0.1.334)", function()
+    local K334 = { grace = 8, hold_t = 10, hold_max = 15 }
+    local Timing = require("lib.timing")
+    local function real(eta) return { est = false, reach = true, eta = eta } end
+    local function estd(eta) return { est = true, reach = true, eta = eta } end
+
+    it("inside grace always holds, whatever the scan", function()
+        local v = Timing.ArrivalWatchdog(107.9, 100, nil, K334)
+        assert_eq(v, "hold")
+        local v2 = Timing.ArrivalWatchdog(105.0, 100, estd(2), K334)
+        assert_eq(v2, "hold")
+    end)
+
+    it("fog: no scan past grace releases why=fog (at-stand tier math; g332 t=358 rides the tethered tier in game)", function()
+        local v, why, over = Timing.ArrivalWatchdog(108.1, 100, nil, K334)
+        assert_eq(v, "release")
+        assert_eq(why, "fog")
+        assert_true(over > 8)
+    end)
+
+    it("estimate churn never pins: est=y past grace releases why=fog (at-stand tier math; g334 t=205 rides the tethered tier in game)", function()
+        local v, why = Timing.ArrivalWatchdog(109.0, 100, estd(0.4), K334)
+        assert_eq(v, "release")
+        assert_eq(why, "fog")
+    end)
+
+    it("a real imminent read holds past grace (the flickering fight, pre-cap)", function()
+        local v = Timing.ArrivalWatchdog(110.0, 100, real(2.9), K334)
+        assert_eq(v, "hold")
+        local v2 = Timing.ArrivalWatchdog(114.9, 100, real(4.7), K334)
+        assert_eq(v2, "hold")
+    end)
+
+    it("the cap ends the lie: real imminent read past hold_max releases why=flicker (g334 t=446/620)", function()
+        local v, why, over = Timing.ArrivalWatchdog(115.1, 100, real(1.5), K334)
+        assert_eq(v, "release")
+        assert_eq(why, "flicker")
+        assert_true(over > 15)
+    end)
+
+    it("a real non-imminent read releases why=slow at wake (the g334 t=532 window, the approved tradeoff)", function()
+        local v, why = Timing.ArrivalWatchdog(108.5, 100, real(11.4), K334)
+        assert_eq(v, "release")
+        assert_eq(why, "slow")
+    end)
+
+    it("unreachable or eta-less reads count as fog, not slow", function()
+        local v, why = Timing.ArrivalWatchdog(109.0, 100, { est = false, reach = false, eta = 3 }, K334)
+        assert_eq(v, "release")
+        assert_eq(why, "fog")
+        local v2, why2 = Timing.ArrivalWatchdog(109.0, 100, { est = false, reach = true, eta = nil }, K334)
+        assert_eq(v2, "release")
+        assert_eq(why2, "fog")
+    end)
+
+    it("the tethered tier (grace=cap) holds any fogged shape to the cap then releases (the shipped g332 t=358 / g334 t=205 behavior)", function()
+        local KT = { grace = 15, hold_t = 10, hold_max = 15 }
+        assert_eq(Timing.ArrivalWatchdog(112.0, 100, nil, KT), "hold")
+        assert_eq(Timing.ArrivalWatchdog(114.9, 100, { est = true, reach = true, eta = 0.4 }, KT), "hold")
+        local v, why = Timing.ArrivalWatchdog(115.1, 100, nil, KT)
+        assert_eq(v, "release")
+        assert_eq(why, "fog")
+    end)
+
+    it("held reports the overshoot past the promise", function()
+        local _, _, over = Timing.ArrivalWatchdog(112.0, 100, real(3), K334)
+        assert_true(over == 12)
+    end)
+
+    it("over exactly at grace still holds (the strict-> house idiom)", function()
+        local v = Timing.ArrivalWatchdog(108.0, 100, nil, K334)
+        assert_eq(v, "hold")
+    end)
+
+    it("over exactly at hold_max with a real imminent read still holds", function()
+        local v = Timing.ArrivalWatchdog(115.0, 100, { est = false, reach = true, eta = 2 }, K334)
+        assert_eq(v, "hold")
     end)
 end)
 
