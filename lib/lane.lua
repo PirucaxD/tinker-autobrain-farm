@@ -305,6 +305,21 @@ function Lane.PredictMeeting(a, b)
     return { point = { x = a.pos.x + dx * f, y = a.pos.y + dy * f }, eta = gap / close }
 end
 
+-- max live member speed of a wave (est waves carry .speed from the mirror; real waves from members).
+function Lane.WaveSpeed(w)
+    if not w then return nil end
+    -- v0.1.256 arc B re-applied (TINKER_LANE_FREEZE_STUDY.md): the MEASURED displacement beats
+    -- the stat - a body-blocked wave reads 325 by stat while standing still (run-64: mid moved
+    -- <100 u/s for 25% of the run; run-71: five 22-60s stand waits on held waves). Floor 20
+    -- keeps PredictMeeting alive (close > 0), so a HELD wave yields an honest HUGE eta and the
+    -- existing far_wave/slack economics jungle it - no new veto.
+    if w.speed_measured then return math.max(20, w.speed_measured) end
+    if w.speed then return w.speed end
+    local s
+    for _, cc in ipairs(w.creeps or {}) do if cc.speed and (not s or cc.speed > s) then s = cc.speed end end
+    return s
+end
+
 ---MEASURED front speed (arc B, the lane-freeze study): real lanes get held/frozen by the
 ---enemy laner - a body-blocked wave's stat speed (NPC.GetMoveSpeed) reads 325 while its
 ---displacement is ~0, so every stat-fed meeting eta is optimistic by the whole freeze.
@@ -394,12 +409,29 @@ function Lane.PredictClash(enemy_wave, ally_wave, towers, opts)
         local rate = drift_coeff * math.abs(b) * creep_speed
         local travel = rate * horizon
         local defend_team = (b > 0) and (ally_wave and ally_wave.team) or (enemy_wave and enemy_wave.team)
-        for _, t in ipairs(towers or {}) do        -- clamp at the nearest defending tower ahead; reaching one = crashing
+        -- v0.1.383: the pick is a PROXIMITY test, not an unbounded ray. It scored ONLY the
+        -- projection along drift_dir, so a tower anywhere sideways won on a tiny projection.
+        -- `along` cannot exceed drift_coeff * creep_speed * horizon (~975 at shipped constants),
+        -- yet the logged contact-to-tower distance ran a median 3212 in g380 and 96.8-97.2% of
+        -- every crash stamp in g379/g380 named a tower the drift cannot physically reach. Those
+        -- stamps set State.crashSeen (Tinker.lua:2536) and CRASH_STICKY_S carries them 10s into a
+        -- decide where defend_crash skips the round-trip window check. A wave crashes a tower when
+        -- it comes within that tower's ATTACK RANGE of the drift segment - bounded sideways AND
+        -- ahead, both by the tower's own range, which the strength loop above already reads.
+        local best_along
+        for _, t in ipairs(towers or {}) do        -- nearest defending tower whose range the drift enters
             if t.alive ~= false and t.pos and t.team == defend_team then
-                local along = (t.pos.x - contact.x) * drift_dir.x + (t.pos.y - contact.y) * drift_dir.y
-                if along > 0 and along < travel then travel = along; crash_tower = t end
+                local tx, ty = t.pos.x - contact.x, t.pos.y - contact.y
+                local along  = tx * drift_dir.x + ty * drift_dir.y
+                local perp   = math.abs(tx * drift_dir.y - ty * drift_dir.x)
+                local rng    = t.range or 700
+                if along > 0 and along <= travel + rng and perp <= rng
+                   and (best_along == nil or along < best_along) then
+                    best_along, crash_tower = along, t
+                end
             end
         end
+        if best_along then travel = math.min(best_along, travel) end   -- never dragged past the budget
         crashing = crash_tower ~= nil                -- the wave pushes up to a defending tower (crashes into it)
         settle = { x = contact.x + drift_dir.x * travel, y = contact.y + drift_dir.y * travel }
         settle_eta = (rate > 0) and (travel / rate) or 0
@@ -489,7 +521,21 @@ function Lane.BuildLaneStates(creeps, towers, heroes, opts)
     local lanes = {}
     for _, lane in ipairs({ "top", "mid", "bot" }) do
         local ew, aw = eByLane[lane], aByLane[lane]
-        local clash = (ew or aw) and Lane.PredictClash(ew, aw, towers, opts) or nil  -- clash from VISIBLE positions only
+        -- v0.1.375: THIS LANE's towers, not all 24. PredictClash clamps the drift at the nearest
+        -- defending tower AHEAD (:397-402), scoring each by its projection ALONG drift_dir with NO
+        -- perpendicular bound, so any tower anywhere on the map with a positive projection could win
+        -- and become the crash target. Measured on 5 logs: 60-77% of every game's crash stamps named
+        -- an OFF-LANE tower (g374 156/224, ctd median 8087 against ctr=700, max 15431; one named a
+        -- bot-side tower at (4860,-6379) as TOP's crash target). Those stamps set State.crashSeen
+        -- (Tinker.lua:2573-2576) and CRASH_STICKY_S 10.0 carries them 10s forward into a decide,
+        -- where the defend_crash bypass (Tinker.lua:3741) skips the round-trip window check: g374
+        -- t=345.8 spent ~10.2s and a Keen on a top trip worth 0 gold on exactly that path.
+        -- towers_by_lane is already built above (:483-486) and already used correctly at :545/:561;
+        -- this was the one consumer still reading the unfiltered list. A lane's wave crashes that
+        -- lane's towers. ACCEPTED NARROWING: base/T4 towers sit near the diagonal and _assign_lane
+        -- (:86) puts them in "mid", so a side-lane wave pushing into the enemy base no longer reports
+        -- crashing - out of scope for the farm layer's defend, which is about OUR lane towers.
+        local clash = (ew or aw) and Lane.PredictClash(ew, aw, towers_by_lane[lane], opts) or nil  -- clash from VISIBLE positions only
         if not ew and opts.game_time then            -- fog-fill: estimate the unseen enemy wave (fogged ONLY)
             local est = Lane.ExpectedWave(opts.game_time, { super = opts.super, mega = opts.mega })
             est.lane, est.estimated = lane, true

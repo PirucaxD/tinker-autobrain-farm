@@ -135,6 +135,7 @@ for i = 1, #arg do
     elseif a == "--state-report" then mode = "state_report"; mode_count = mode_count + 1
     elseif a == "--fog-report" then mode = "fog_report"; mode_count = mode_count + 1
     elseif a == "--stuck-report" then mode = "stuck_report"; mode_count = mode_count + 1
+    elseif a == "--crash-report" then mode = "crash_report"; mode_count = mode_count + 1
     elseif a:match("^%-%-fog%-recalc=") then opt_fog_recalc = a:match("^%-%-fog%-recalc=(.+)$")
     elseif a == "--with-takeover" then opt_with_takeover = true
     elseif a == "--help" or a == "-h" then usage(); os.exit(0)
@@ -3386,7 +3387,7 @@ elseif mode == "state_report" then
             w.only_pollers and "[POLLER-ONLY] " or "", table.concat(str, ", ")))
     end
     os.exit(0)
-elseif mode ~= "fog_report" and mode ~= "stuck_report" then   -- v0.1.353/v0.1.362: fog_report and stuck_report are handled in their own blocks at the end of the file, so the timeline fallback must not also fire for them
+elseif mode ~= "fog_report" and mode ~= "stuck_report" and mode ~= "crash_report" then   -- v0.1.353/v0.1.362/v0.1.383: fog_report, stuck_report and crash_report are handled in their own blocks at the end of the file, so the timeline fallback must not also fire for them
     -- timeline mode. v6.15.2 low: sort kv keys deterministically per-line
     -- so diff-tooling output is stable between runs.
     for i = 1, #events do
@@ -3615,5 +3616,238 @@ if mode == "stuck_report" then
     print(string.format("COST: %d keen_home purpose=unstick round trip(s).", #unsticks))
     print("    Cross-check the seconds against --state-report, whose `keen_home FIRED unstick`")
     print("    bucket measures the same trips from the silence side (g366: 128s = 26.5%).")
+    os.exit(0)
+
+elseif mode == "crash_report" then
+    -- v0.1.383 ACCEPTANCE INSTRUMENT for the crash-model proximity fix.
+    -- THE BAR IS ARITHMETIC, NOT A CALIBRATED THRESHOLD. PredictClash clamps the drift at a
+    -- defending tower scored by its projection ALONG drift_dir, and the travel budget is
+    -- drift_coeff * |b| * creep_speed * horizon. Tinker passes NO clash opts (there is no
+    -- drift_coeff / horizon / creep_speed / tower_weight anywhere in Tinker.lua), so the lib
+    -- defaults apply and the ceiling at |b| = 1 is 0.5 * 325 * 6 = 975. ctd is the contact-to-tower
+    -- EUCLIDEAN distance and ctd >= along ALWAYS, so a stamp with ctd > 975 named a tower the drift
+    -- could not physically reach in the horizon. That share IS the defect rate: it needs no
+    -- calibration, no control game, and no baseline year.
+    -- IF THOSE CONSTANTS EVER MOVE (a clash opts table in the hero, or new lib defaults), MOVE THEM
+    -- HERE IN THE SAME COMMIT - a stale mirror here silently turns the bar into the wrong question,
+    -- which is exactly how WAVE_PHASE hid for dozens of builds (see the mirror note above).
+    -- BASELINES on the CEILING bar, this tool, takeover windows excised. Quote these, not a raw
+    -- grep: a hand grep includes user-takeover play, which is the g347 measurement error.
+    --   pre-fix : g374 84.2%  g376 44.4%  g377 55.7%  g379 76.7%  g380 71.4%
+    --   post-fix: g381 0.0% (0/30, max ctd 1313)  <- v0.1.383, the first build with the bound
+    -- The SECOND number is the one that actually convinced: episodes whose ctd SHRINKS, i.e. the
+    -- flag tracking a real approach instead of flickering. Pre-fix 8/59, 1/14, 0/14, 0/8, 1/11
+    -- (2-14%); g381 3/4 (75%), each naming ONE consistent tower with ctd falling monotonically.
+    -- DO NOT SCORE A FALLING STAMP COUNT AS SUCCESS. The fix necessarily cuts the count, so the
+    -- count falling is true by construction. Two things matter, and the second is the risky one:
+    -- the unreachable share must go to ZERO, and crash stamps must still EXIST. A game with zero
+    -- defend verdicts is RED (the run-76 precedent: a ~415 gold wave ate our T2).
+    -- CORRECTION, g381: THE FIRST VERSION OF THIS BAR WAS WRONG AND PRINTED A FALSE FAIL.
+    -- It tested ctd > MAXTRAVEL (975), which is the envelope of the OLD rule (`along < travel`).
+    -- v0.1.383 ships `along <= travel + rng` AND `perp <= rng`, so the shipped rule can legitimately
+    -- name a tower out to sqrt((975+700)^2 + 700^2) = 1815. Judging the new rule against the old
+    -- rule's envelope scored a clean g381 (max ctd 1313, i.e. 30/30 inside 1815) as 53.3% FAIL.
+    -- That is the same species of error as the "0% off-lane" identity: the bar must be derived from
+    -- the rule ACTUALLY RUNNING, not the one it replaced. Both numbers are printed below - CEILING
+    -- is the verdict, MAXTRAVEL is kept only to compare against pre-fix logs on their own terms.
+    local DRIFT_COEFF, CREEP_SPEED, HORIZON, RNG = 0.5, 325, 6, 700
+    local MAXTRAVEL = DRIFT_COEFF * 1.0 * CREEP_SPEED * HORIZON
+    local CEILING = math.sqrt((MAXTRAVEL + RNG) ^ 2 + RNG ^ 2)
+    local function pctl(t, q)
+        if #t == 0 then return 0 end
+        return t[math.max(1, math.min(#t, math.ceil(q / 100 * #t)))]
+    end
+    local function build_of(p)
+        local f = io.open(p, "r"); if not f then return "?" end
+        for line in f:lines() do
+            local v = line:match("Tinker brain (v[%d%.]+)")
+            if v then f:close(); return v end
+        end
+        f:close(); return "NO BANNER"
+    end
+
+    print(string.format("--- crash report --- THE BAR: ctd > %.0f = a tower the SHIPPED rule cannot reach", CEILING))
+    print(string.format("    ceiling = sqrt((travel %.0f + range %d)^2 + range %d^2), travel = drift_coeff %.2f * creep_speed %d * horizon %d at |b|=1",
+        MAXTRAVEL, RNG, RNG, DRIFT_COEFF, CREEP_SPEED, HORIZON))
+    print(string.format("    (the pre-v0.1.383 rule had no range extension and no perp bound; its own envelope was %.0f,", MAXTRAVEL))
+    print("     reported below as a second line so pre-fix logs can still be read on their own terms)")
+    print("")
+    for _, p in ipairs(paths) do
+        local evs = load_log(p)
+        local n_ally, n_enemy, n_none = 0, 0, 0
+        local ctds, ctds_ally = {}, {}
+        local over, over_ally, legacy_over = 0, 0, 0
+        local ctr_odd = 0
+        local open, eps = {}, {}
+        local dur = 0
+        for _, e in ipairs(evs) do
+            if e.event == "wavescan" then
+                if e.kv.t and not e.kv.ln then dur = math.max(dur, tonumber(e.kv.t) or 0) end
+                local ln, crash = e.kv.ln, e.kv.crash
+                if ln and crash then
+                    if crash == "allyTwr" then n_ally = n_ally + 1
+                    elseif crash == "enemyTwr" then n_enemy = n_enemy + 1
+                    else n_none = n_none + 1 end
+                    local d = tonumber(e.kv.ctd)
+                    if crash ~= "-" and d then
+                        ctds[#ctds + 1] = d
+                        if d > CEILING then over = over + 1 end
+                        if d > MAXTRAVEL then legacy_over = legacy_over + 1 end
+                        if crash == "allyTwr" then
+                            ctds_ally[#ctds_ally + 1] = d
+                            if d > CEILING then over_ally = over_ally + 1 end
+                        end
+                        if (tonumber(e.kv.ctr) or 700) ~= 700 then ctr_odd = ctr_odd + 1 end
+                    end
+                    -- allyTwr EPISODES. The point is not how many stamps but whether the flag
+                    -- TRACKS AN APPROACH: a real crash closes on the tower, so ctd shrinks across
+                    -- the episode. Pre-fix it shrank in 2 of 49 episodes over four games, which is
+                    -- what refuted the "the model goes blind for the last 700 units" story.
+                    if crash == "allyTwr" then
+                        local o = open[ln]
+                        if not o then o = { first = d, n = 0, lane = ln }; open[ln] = o end
+                        o.n, o.last = o.n + 1, d
+                    elseif open[ln] then
+                        eps[#eps + 1] = open[ln]; open[ln] = nil
+                    end
+                end
+            end
+        end
+        for _, o in pairs(open) do eps[#eps + 1] = o end
+        table.sort(ctds); table.sort(ctds_ally)
+        local shrink, scans = 0, {}
+        for _, ep in ipairs(eps) do
+            if ep.first and ep.last and ep.last < ep.first then shrink = shrink + 1 end
+            scans[#scans + 1] = ep.n
+        end
+        table.sort(scans)
+        local n_st = #ctds
+        local share = n_st > 0 and 100 * over / n_st or 0
+
+        print(string.format("== %-26s %-9s  %5.0fs   scans allyTwr=%d enemyTwr=%d none=%d",
+            p:match("[^/\\]+$"), build_of(p), dur, n_ally, n_enemy, n_none))
+        if n_st == 0 then
+            print("   NO crash stamps at all. That is RED, not a pass: the defend path cannot fire.")
+        else
+            print(string.format("   UNREACHABLE (ctd > %.0f): %d/%d = %.1f%%   [allyTwr %d/%d = %.1f%%]   <<< THE BAR",
+                CEILING, over, n_st, share, over_ally, #ctds_ally,
+                #ctds_ally > 0 and 100 * over_ally / #ctds_ally or 0))
+            print(string.format("   beyond the OLD un-extended budget (ctd > %.0f): %d/%d = %.1f%%  (context only, NOT the verdict)",
+                MAXTRAVEL, legacy_over, n_st, 100 * legacy_over / n_st))
+            print(string.format("   ctd: min=%.0f p25=%.0f p50=%.0f p75=%.0f max=%.0f",
+                ctds[1], pctl(ctds, 25), pctl(ctds, 50), pctl(ctds, 75), ctds[#ctds]))
+            print(string.format("   allyTwr episodes: %d   median scans=%d   ctd SHRANK across %d of them (a real approach shrinks)",
+                #eps, #scans > 0 and pctl(scans, 50) or 0, shrink))
+            if ctr_odd > 0 then
+                print(string.format("   NOTE: %d stamp(s) carry ctr ~= 700. The bar assumes the tower range the strength", ctr_odd))
+                print("         loop and the pick both read; re-derive it before trusting this run.")
+            end
+            local verdict = (share <= 5) and "PASS" or "FAIL"
+            print(string.format("   VERDICT: %s   episodes tracking an approach: %d/%d  (pre-fix 0/8 and 1/11; a real crash SHRINKS)",
+                verdict, shrink, #eps))
+        end
+        print("")
+    end
+    -- ---- THE FALSE-NEGATIVE SIDE: crashes the model MISSED ------------------------------------
+    -- Everything above measures whether a FLAGGED tower was reachable. It cannot see a real crash
+    -- the model stayed silent on, and that is the expensive direction: the run-76 regression was a
+    -- ~415g wave eating our T2 while the flag read "-". This block is MODEL-INDEPENDENT: it asks
+    -- only whether the enemy wave FRONT is physically inside one of OUR tower's range, using
+    -- MapData.TOWERS, and then reports what the model said on that same row.
+    -- CAVEAT, and it is real: MapData.TOWERS is STATIC, so a destroyed tower still counts and its
+    -- ground keeps generating "crash situations" forever. Read this on lane-phase logs (Keen L2 not
+    -- reached, towers mostly up) and treat a late-game log with suspicion.
+    -- Two bands because the two rulers disagree: the ENGINE reports 700 (ctr=700 on every row and
+    -- the model gates on it) while the operator OBSERVED 900 in game (the .310 standing law).
+    print("--- MISSED CRASHES (model-independent: enemy front inside OUR tower range, per MapData) ---")
+    print("    static tower table, so a DEAD tower still counts: read this on lane-phase logs.")
+    print("    the run-76 shape is the UNDEFENDED column: no ally hero AND ally creeps a<=1, i.e.")
+    print("    nothing left between the wave and the tower. A wave at our tower WITH our creeps")
+    print("    still alive is ordinary lane phase, not an emergency.")
+    local MD2 = require("lib.map_data")
+    for _, p in ipairs(paths) do
+        local evs = load_log(p)
+        -- v0.1.387 (adversarial review, CONFIRMED): `team` used to default to 2 with NO not-found
+        -- path, so a log missing self_acquired silently measured every enemy wave against the
+        -- ENEMY team's towers and invented run-76-shaped emergencies with nothing on screen saying
+        -- the read had failed. Verified: strip the self_acquired lines from the Dire log g381 and
+        -- the block flips from "18 near, 0 UNDEFENDED" to "42 near, 5 UNDEFENDED" naming Radiant
+        -- towers. Say so instead, the way build_of already prints NO BANNER.
+        local team = nil
+        for _, e in ipairs(evs) do
+            if e.event == "self_acquired" then team = tonumber(e.kv.team) or team end
+        end
+        if not team then
+            print(string.format("  %-26s NO self_acquired: team unknown, block SKIPPED (it would measure",
+                (p:gsub("^.*/", ""))))
+            print("                             enemy waves against the WRONG team's towers and invent emergencies)")
+            goto continue_missed
+        end
+        local mine = {}
+        for _, t in ipairs(MD2.TOWERS or {}) do
+            if t.team == team and t.pos then mine[#mine + 1] = { x = t.pos[1], y = t.pos[2], name = t.name } end
+        end
+        local function nearest(px, py)
+            local bd, bn = math.huge, nil
+            for _, t in ipairs(mine) do
+                local dx, dy = t.x - px, t.y - py
+                local d = math.sqrt(dx * dx + dy * dy)
+                if d < bd then bd, bn = d, t.name end
+            end
+            return bd, bn
+        end
+        local sit, hit, miss, miss_alone = { [700] = 0, [900] = 0 }, { [700] = 0, [900] = 0 },
+                                           { [700] = 0, [900] = 0 }, { [700] = 0, [900] = 0 }
+        local worst = nil
+        for _, e in ipairs(evs) do
+            if e.event == "wavescan" and e.kv.ln and e.kv.est == "n" and e.kv.ef and e.kv.ef ~= "-" then
+                local fx, fy = e.kv.ef:match("^(%-?%d+);(%-?%d+)$")
+                local cnt = tonumber(e.kv.e) or 0
+                if fx and cnt >= 3 then
+                    local d, nm = nearest(tonumber(fx), tonumber(fy))
+                    local alh = tonumber(e.kv.alH) or 0
+                    for _, band in ipairs({ 700, 900 }) do
+                        if d <= band then
+                            sit[band] = sit[band] + 1
+                            if e.kv.crash == "allyTwr" then hit[band] = hit[band] + 1
+                            else
+                                miss[band] = miss[band] + 1
+                                -- THE RUN-76 SHAPE, and the ally HERO count is not enough to find it.
+                                -- A wave sitting at our tower is ordinary lane phase for as long as
+                                -- OUR CREEPS are there fighting it: the tower only actually takes
+                                -- damage once the ally wave is gone. So the dangerous class is
+                                -- ally creeps a<=1 AND no ally hero. Without the a<=1 term this
+                                -- proxy over-counts by roughly 5x and would justify a fix that
+                                -- makes defend_crash, the most absolute verdict in the scheduler,
+                                -- fire through most of the laning phase.
+                                local aw = tonumber(e.kv.a) or 0
+                                if alh == 0 and aw <= 1 then
+                                    miss_alone[band] = miss_alone[band] + 1
+                                    if band == 700 and (not worst or cnt > worst.e) then
+                                        worst = { e = cnt, hp = tonumber(e.kv.hp) or 0, d = d,
+                                                  twr = nm, ln = e.kv.ln, crash = e.kv.crash, a = aw }
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        io.write(string.format("  %-26s team=%d  ", p:match("[^/\\]+$"), team))
+        for _, band in ipairs({ 700, 900 }) do
+            io.write(string.format("[<=%d: %d near, %d flagged, %d missed, %d UNDEFENDED]  ",
+                band, sit[band], hit[band], miss[band], miss_alone[band]))
+        end
+        print("")
+        if worst then
+            print(string.format("      worst UNDEFENDED: ln=%s e=%d hp=%d a=%d  %.0fu from %s  crash=%s",
+                worst.ln, worst.e, worst.hp, worst.a, worst.d, worst.twr, worst.crash))
+        end
+        ::continue_missed::
+    end
+    print("")
+    print("REMINDER: a falling stamp COUNT is true by construction once the pick is a proximity")
+    print("test, so it is not evidence. Read the unreachable share AND whether defends still fire.")
     os.exit(0)
 end

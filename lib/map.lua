@@ -68,6 +68,12 @@ function Map.CampCenter(camp)
     return _center_of_box(Camp.GetCampBox(camp))
 end
 
+---pure: stable identity key for a camp centre - a 100-unit bucket, so the same camp read from
+---slightly different engine samples (or from a hand-written pair whitelist) hashes to one key.
+function Map.CampKey(c)
+    return string.format("%d,%d", math.floor((c and c.x or 0) / 100), math.floor((c and c.y or 0) / 100))
+end
+
 local function _camp_desc(c)
     return { camp = c, center = Map.CampCenter(c), type = Camp.GetType(c), box = Camp.GetCampBox(c) }
 end
@@ -165,6 +171,28 @@ end
 ---Is a single position walkable?
 function Map.Walkable(pos)
     return GridNav.IsTraversable(pos) == true
+end
+
+-- Is (x,y) walkable ground? Coerces IsTraversable (may return a truthy INT, not a bool); API absent or a
+-- read error -> treat as walkable (don't over-reject a real landing).
+function Map.WalkablePt(x, y)
+    if not (Map.Walkable and Map.GroundPos) then return true end
+    local ok, w = pcall(function() return Map.Walkable(Map.GroundPos(x, y)) end)
+    return (not ok) or (w ~= false)
+end
+
+-- Walkable snap: try the point, then step toward `toward` until walkable (Note 1 root fix home;
+-- shared by the stand composition, the cast points, and the tree-blink landing).
+function Map.SnapWalkable(p, toward)
+    if not (Map.Walkable and Map.GroundPos) then return { x = p.x, y = p.y } end
+    for i = 0, 5 do
+        local f = 1 - i * 0.2                          -- the point first, then step toward `toward`
+        local qx = toward.x + (p.x - toward.x) * f
+        local qy = toward.y + (p.y - toward.y) * f
+        local ok, walk = pcall(function() return Map.Walkable(Map.GroundPos(qx, qy)) end)
+        if ok and walk then return { x = qx, y = qy } end
+    end
+    return { x = toward.x, y = toward.y }              -- fall back to `toward` (lane = walkable)
 end
 
 return Map

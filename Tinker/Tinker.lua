@@ -15,7 +15,7 @@
 if package and package.loaded then
     for _, m in ipairs({ "lib.map", "lib.farm", "lib.lane", "lib.route", "lib.nav", "lib.schedule",
                          "lib.escape", "lib.hero_value", "lib.geometry", "lib.map_data", "lib.channel_gate",
-                         "lib.defense", "lib.item_saves", "lib.target" }) do
+                         "lib.defense", "lib.item_saves", "lib.target", "lib.position_data" }) do
         package.loaded[m] = nil
     end
 end
@@ -42,6 +42,56 @@ local ItemSaves = require("lib.item_saves")   -- ARC E2: hero-agnostic defensive
 local Target    = require("lib.target")       -- ARC E2: enemy-hero test for the harvest filter (also loaded transitively by item_saves/escape)
 local Draw      = require("lib.draw")         -- v0.1.324 headroom lift wave 1: screen-space drawing/debug rendering (Font/W2S/Text/WorldText/Ring/Line/Seg/OBox)
 local Vision    = require("lib.vision")       -- v0.1.354: shared last-seen tracker (OnSetDormant); feeds lib/escape FogSnapshot
+local Pos       = require("lib.position_data") -- v0.1.378, LIVE since v0.1.382: per-hero PLAYABLE Dota positions (D2PT 7k, period 8). Data only, read by the shadow classifier below and by NOTHING that moves the hero.
+
+-- ── SHARED-LIB TRIPWIRE (v0.1.388) ───────────────────────────────────────────
+-- C:/Umbrella/scripts/lib is ONE directory shared by every hero package a user installs, so a
+-- second package can overwrite a lib with an OLDER copy and strip functions this hero calls. The
+-- failure mode is terrible: `attempt to call a nil value (field 'DepthRuler')` thrown from inside
+-- OnUpdateEx EVERY DECIDE, with a traceback that names Tinker.lua and blames the wrong file.
+-- REPORTED IN THE FIELD (user jonat): the public dota-hero-brains package ships lib/lane.lua at
+-- 410 lines against this tree's 930, and 18 of the 26 libs the two packages share DIFFER. That one
+-- install is missing 25 functions across 5 libs (lane: BuildLanePaths/Depth/DepthRuler/
+-- PredictMeeting/PushForecast/TrackFrontSpeed, farm: CrashCast/DepthPoints/GreedyPairs/MarchCovers/
+-- ObservedFarmers/OutsideTowerRange/PathRisk, escape: CommitWiden/DiagGate/FogProximityRisk/
+-- MissingCount/NearestEnemyEdge/ReachableFog, schedule: CycleFill/NextOnGrid/StackWindow/
+-- WaveCycleCost, geometry: BestReachLanding/DiscReachPoint), so fixing one symbol just uncovers
+-- the next. It is a PACKAGING fault, not a code fault, and no amount of reading Tinker.lua finds it.
+-- This is a SENTINEL, not a contract: one or two of the newest exports per shared lib, which is
+-- what a stale copy loses first. It is LOG-ONLY and deliberately does not disable the brain - the
+-- point is to put one actionable line at the top of the log instead of a per-tick traceback.
+do
+    local need = {
+        ["lib/lane.lua"]          = { Lane,     "Lane",     { "DepthRuler", "PushForecast" } },
+        ["lib/farm.lua"]          = { Farm,     "Farm",     { "CrashCast", "ObservedFarmers" } },
+        ["lib/escape.lua"]        = { Escape,   "Escape",   { "CommitWiden", "NearestEnemyEdge" } },
+        ["lib/schedule.lua"]      = { Schedule, "Schedule", { "CycleFill" } },
+        ["lib/geometry.lua"]      = { Geometry, "Geometry", { "DiscReachPoint" } },
+        ["lib/nav.lua"]           = { Nav,      "Nav",      { "SafeDest" } },
+        ["lib/position_data.lua"] = { Pos,      "Pos",      { "Shadow" } },
+    }
+    local bad = {}
+    for file, spec in pairs(need) do
+        local mod, name, fns = spec[1], spec[2], spec[3]
+        if type(mod) ~= "table" then
+            bad[#bad + 1] = file .. " (module did not load)"
+        else
+            for _, fn in ipairs(fns) do
+                if type(mod[fn]) ~= "function" then
+                    bad[#bad + 1] = file .. " is missing " .. name .. "." .. fn
+                end
+            end
+        end
+    end
+    if #bad > 0 and LOG then
+        table.sort(bad)
+        LOG:info("Tinker STALE SHARED LIB: " .. table.concat(bad, "; ")
+            .. ". Another hero package in scripts/lib has overwritten a lib with an older copy. "
+            .. "Tinker will throw a nil-value error every decide until the WHOLE lib directory is "
+            .. "replaced with the one shipped alongside this Tinker.lua. Fixing a single file is "
+            .. "not enough: the stale set is missing many functions and you will just hit the next.")
+    end
+end
 -- (lib.dedup require DROPPED at Task 3 review: the dispatcher's in_flight_locks
 -- subsume the responded-dedup role per lib/defense.lua:22-26.)
 
@@ -233,7 +283,9 @@ local K = {
     CHANNEL_GATE_MARGIN = 500,                       -- ARC E1: a channel start is deferred when a disabler-kit enemy is within its max disable cast range + this (they close ground during the 1.2-2.93s channel; calibrate off channel_defer vs missed-rearm idle)
     CHANNEL_GATE_HORIZON = 3.0,                      -- E2 final review: readiness is judged at now()+this (covers the 2.93s Keen channel) - a breaker coming off cd DURING our channel still breaks it
     CHANNEL_DEFER_BAIL_S = 4.0,                      -- run-75: a wave engage whose Rearm the gate has deferred this long (parked disabler) bails + suppresses instead of standing (the .239 never-hold law)
-    CRASH_STICKY_S       = 10.0,                     -- run-76: a crash-our-tower flag seen by the 2s scan counts as crashing for this long (the instantaneous flag flickers mid-fight; decides sampled false instants and the 415g bot T2 wave went undefended)
+    TOWER_THREAT_R       = 1100,                     -- v0.1.385: an enemy wave front within this of one of OUR live HOME-lane towers, with no ally hero in the lane, counts as a crash the clash model cannot see. 0 disables the whole rule with no code edit. CALIBRATION RECORD CORRECTED at v0.1.387 after adversarial review: the v0.1.385 claim that 1100 reproduces all THREE watched g382 episodes was FALSE. It reproduces TWO. The third (t=554-566) reads alH=1 on every row and so is excluded by the rule's own no-ally-hero term at ANY radius. R of 1000, 1100 and 1300 give BIT-IDENTICAL firing sets on the corpus, so 1100 is not uniquely determined; 700 catches only a single scan fragment inside episode 1 and neither tabulated episode (833u and 944u are both outside it).
+    TOWER_THREAT_MINC    = 3,                        -- v0.1.385: minimum enemy creep count for the tower-threat stamp. CORRECTED at v0.1.387: the claim that 4 misses an episode was FALSE. At MINC 4 BOTH catchable g382 episodes still fire; all 4 drops is one scan fragment INSIDE episode 1. So 3 is not a calibrated floor, it is simply the looser of two settings that behave the same on the corpus. The real over-fire control is the v0.1.387 strength guard below, not this count.
+    CRASH_STICKY_S       = 10.0,                  -- run-76: a crash-our-tower flag seen by the 2s scan counts as crashing for this long (the instantaneous flag flickers mid-fight; decides sampled false instants and the 415g bot T2 wave went undefended)
     REARM_STEPBACK_S     = 4.0,                      -- run-78: a wave engage whose Rearm the gate blocks walks OUT of the gating enemy's reach for up to this long to rearm there (keeps the wave); expiry falls through to the .262 bail
     DISPATCH_HP_MIN     = 0.50,                      -- case-file #2 (run-72 t=445): a due shove below this HP fraction recovers first - PANIC_HP 0.40 fires on arrival otherwise (keen + ~50s donated); fed to Schedule.Plan as ctx.min_hp_frac
     LASER_MANA_FB       = 95,                         -- Laser mana fallback (Liquipedia ~95-120); abil_mana reads the real cost, this is only used if that read fails
@@ -353,9 +405,6 @@ local TIER_EST = {
     [2] = { gold = 105, hp = 2400 },   -- large
     [3] = { gold = 160, hp = 3600 },   -- ancient (raw midpoint; v0.1.183 reverts the 4300 MR bump - the tier FLOOR owns the planning count now, and the sum-ceil only binds for stacks where raw totals are the honest input)
 }
-local function camp_key(c)
-    return string.format("%d,%d", math.floor((c and c.x or 0) / 100), math.floor((c and c.y or 0) / 100))
-end
 local function next_respawn() return (math.floor(now() / 60) + 1) * 60 end   -- next xx:00 (neutral spawn)
 local function is_cleared(key)
     local t = State.cleared and State.cleared[key]
@@ -372,7 +421,7 @@ local function mark_spot_cleared(s, until_t)
     if not s then return end
     mark_cleared(s.key, until_t)
     local ss = s.standSpot
-    if ss and ss.paired and ss.partner then mark_cleared(camp_key(ss.partner), until_t) end
+    if ss and ss.paired and ss.partner then mark_cleared(Map.CampKey(ss.partner), until_t) end
 end
 
 local function marches_for(t)   -- tier 0=small 1=medium 2=large 3=ancient
@@ -386,10 +435,10 @@ end
 -- bucket, robust to rounding). Feeds Farm.GreedyPairs' `allow` so ONLY these pairs may exceed PAIR_RADIUS.
 local function forced_pair(a, b)
     if not (a and b) then return false end
-    local ka, kb = camp_key(a), camp_key(b)
+    local ka, kb = Map.CampKey(a), Map.CampKey(b)
     for _, f in ipairs(K.FORCE_PAIRS or {}) do
-        local k1 = camp_key({ x = f[1][1], y = f[1][2] })
-        local k2 = camp_key({ x = f[2][1], y = f[2][2] })
+        local k1 = Map.CampKey({ x = f[1][1], y = f[1][2] })
+        local k2 = Map.CampKey({ x = f[2][1], y = f[2][2] })
         if (ka == k1 and kb == k2) or (ka == k2 and kb == k1) then return true end
     end
     return false
@@ -704,7 +753,31 @@ local function try_rearm()
         State.chanDeferSince = nil   -- gate clear: reach broke or the kit went on cd
     end
     local rcost = (Ability.GetManaCost and Ability.GetManaCost(State.rearm)) or K.REARM_MANA_FB   -- v0.1.97: was a hardcoded 150 (Rearm fallback is 225)
-    if mana() < State.menu.escapeMana:Get() + rcost then return false end
+    -- v0.1.384 PROBE (log-only, nothing gates on it). THIS REFUSAL IS SILENT, and it is the one
+    -- place the two rearm-fundability rulers disagree (bug class 3). The callers pre-check
+    -- effective_mana() = raw + Bottle charges + Arcane + Soul Ring, with NO escape reserve (:6193
+    -- bails only below rearm+march); this spends RAW against the 150 reserve. Between the two bars
+    -- the hero neither bails nor rearms, and sits in ENGAGE until the v0.1.377 castless watchdog
+    -- releases it ~4s later. The band is reachable on paper - raw 345..375 with no items at all at
+    -- L2 costs, and wider when counted Bottle charges are never converted because bottle_tick only
+    -- drinks below K.BOTTLE_MANA 200 - but it has NEVER been measured: `engage_bail
+    -- reason=rearm_unfundable` is 0 across five games and this site logs nothing at all.
+    -- IF `rearm_nofund` SHOWS A REAL RATE, the fix is to make the callers test the SAME quantity
+    -- this does (raw + reserve), so the bail is honest instead of a stall. IF IT STAYS AT ZERO,
+    -- CLOSE THE ITEM: the mismatch is unreachable in play and the reserve is safety-critical.
+    local need = State.menu.escapeMana:Get() + rcost
+    if mana() < need then
+        -- v0.1.386: hand the gap to bottle_tick. UNTHROTTLED (the logline below is throttled and
+        -- must not gate behaviour) and stamped every refusal, so the drink decision sees the CURRENT
+        -- shortfall rather than a stale one.
+        State.rearmNoFundT, State.rearmNoFundGap = now(), need - mana()
+        if now() - (State.rearmNoFundLogT or 0) > 1.0 then
+            State.rearmNoFundLogT = now()
+            logline(string.format("rearm_nofund raw=%.0f eff=%.0f need=%.0f rcost=%.0f gap=%.0f fsm=%s",
+                mana(), effective_mana(), need, rcost, need - mana(), tostring(State.fsm)))
+        end
+        return false
+    end
     if not cast_no_target(State.rearm) then return false end
     local lvl = (Ability.GetLevel and Ability.GetLevel(State.rearm)) or 1
     State.channelUntil = now() + (K.REARM_CHANNEL[lvl] or K.REARM_CHANNEL[1]) + K.CHANNEL_PAD
@@ -1327,20 +1400,6 @@ local function do_blink(dest)
     return false
 end
 
--- Walkable snap: try the point, then step toward `toward` until walkable (Note 1 root fix home;
--- shared by the stand composition, the cast points, and the tree-blink landing).
-local function snap_walkable(p, toward)
-    if not (Map.Walkable and Map.GroundPos) then return { x = p.x, y = p.y } end
-    for i = 0, 5 do
-        local f = 1 - i * 0.2                          -- the point first, then step toward `toward`
-        local qx = toward.x + (p.x - toward.x) * f
-        local qy = toward.y + (p.y - toward.y) * f
-        local ok, walk = pcall(function() return Map.Walkable(Map.GroundPos(qx, qy)) end)
-        if ok and walk then return { x = qx, y = qy } end
-    end
-    return { x = toward.x, y = toward.y }              -- fall back to `toward` (lane = walkable)
-end
-
 -- Proactive escape blink: flee to the safest walkable spot within blink clamp BEFORE the burst
 -- (damage_cooldown 3 makes it useless once hit). Primary escape; the caller falls back to walk/keen.
 -- Tree-blink (glue rebuild item 5): prefer hiding in the densest standing-tree cluster away from
@@ -1369,7 +1428,7 @@ local function try_escape_blink()
     end
     local hide = Nav.TreeHideSpot(trees, { x = me.x, y = me.y }, threat, { blink_max = K.BLINK_CLAMP })
     if hide then
-        hide = snap_walkable(hide, { x = me.x, y = me.y })       -- land beside the cluster, not IN a tree
+        hide = Map.SnapWalkable(hide, { x = me.x, y = me.y })       -- land beside the cluster, not IN a tree
         if do_blink(Vector(hide.x, hide.y, me.z)) then
             logline(string.format("blink_escape tree dest=(%.0f,%.0f)", hide.x, hide.y))
             return true
@@ -1447,7 +1506,7 @@ local function try_travel_blink(aim)
             -- clips the TREELINE at the clamp point, deterministically, every trip): SNAP the
             -- landing back toward the hero onto walkable ground (castable by construction - a
             -- slightly shorter hop + a short walk) instead of refusing the whole blink.
-            land = snap_walkable(land, { x = me.x, y = me.y })
+            land = Map.SnapWalkable(land, { x = me.x, y = me.y })
             local ok2, walk2 = pcall(function() return Map.Walkable(Map.GroundPos(land.x, land.y)) end)
             if not (ok2 and walk2) then return skip("land_unwalkable") end
         end
@@ -1791,7 +1850,7 @@ local function gather_candidates()
     local neutrals = Map.AllNeutrals()                                      -- enumerate neutrals ONCE; box-filter per camp (was a full-map scan per camp)
     for _, cd in ipairs(Map.Camps()) do
         total = total + 1
-        local key = camp_key(cd.center)
+        local key = Map.CampKey(cd.center)
         if is_cleared(key) then                                            -- recently visited/cleared: skip until respawn
             cleared = cleared + 1
         else
@@ -1857,7 +1916,7 @@ local function safe_stand_for(meeting, forward, deep_ok, lane)
     -- lands in the SCHEDULE, per the point-system doctrine). deep_ok (raid-capable) exempts: that
     -- transit is a creep-keen, not a walk. tower_safe always holds.
     local stand = Nav.SafeDest(g.stand, { x = dx / dl, y = dy / dl }, tower_safe)
-    stand = snap_walkable(stand, meeting)
+    stand = Map.SnapWalkable(stand, meeting)
     local reach  = (K.MARCH_CAST_RANGE or 300) + (K.MARCH_HALFWIDTH or 900)
     -- v0.1.201: the deep era leashes lane positions to our mid tower (T1DOWN_LEASH).
     -- v0.1.202 (user, run-30: "skipped an obvious keen on creep on a 5-6 creep wave, no way to get
@@ -1904,9 +1963,9 @@ local function protected_wait_spot(stand)
         local dx, dy = stand.x - best.x, stand.y - best.y
         local dl = math.sqrt(dx * dx + dy * dy)
         if dl > 1 then
-            return snap_walkable({ x = best.x + dx / dl * K.WAIT_PROTECT_AHEAD,
-                                   y = best.y + dy / dl * K.WAIT_PROTECT_AHEAD },
-                                 { x = stand.x, y = stand.y })
+            return Map.SnapWalkable({ x = best.x + dx / dl * K.WAIT_PROTECT_AHEAD,
+                                       y = best.y + dy / dl * K.WAIT_PROTECT_AHEAD },
+                                     { x = stand.x, y = stand.y })
         end
         return { x = best.x, y = best.y }
     end
@@ -1915,9 +1974,9 @@ local function protected_wait_spot(stand)
         local dx, dy = fp.x - stand.x, fp.y - stand.y
         local dl = math.sqrt(dx * dx + dy * dy)
         if dl > 1 then
-            return snap_walkable({ x = stand.x + dx / dl * K.WAIT_BACKOFF,
-                                   y = stand.y + dy / dl * K.WAIT_BACKOFF },
-                                 { x = stand.x, y = stand.y })
+            return Map.SnapWalkable({ x = stand.x + dx / dl * K.WAIT_BACKOFF,
+                                       y = stand.y + dy / dl * K.WAIT_BACKOFF },
+                                     { x = stand.x, y = stand.y })
         end
     end
     return { x = stand.x, y = stand.y }
@@ -1950,7 +2009,7 @@ local function idle_wait_spot(stand)
     local fp = friendly_fountain_pos()
     if not fp then return { x = stand.x, y = stand.y } end
     local wx, wy = Geometry.DiscReachPoint(stand.x, stand.y, K.WAIT_STEP_BACK, fp.x, fp.y)
-    return snap_walkable({ x = wx, y = wy }, { x = stand.x, y = stand.y })
+    return Map.SnapWalkable({ x = wx, y = wy }, { x = stand.x, y = stand.y })
 end
 
 -- Keen anchor candidates: friendly buildings (live) + friendly outposts (static,
@@ -2038,14 +2097,6 @@ local function anchor_candidates(include_creeps)
     return out
 end
 
--- Is (x,y) walkable ground? Coerces IsTraversable (may return a truthy INT, not a bool); API absent or a
--- read error -> treat as walkable (don't over-reject a real landing).
-local function walkable_pt(x, y)
-    if not (Map.Walkable and Map.GroundPos) then return true end
-    local ok, w = pcall(function() return Map.Walkable(Map.GroundPos(x, y)) end)
-    return (not ok) or (w ~= false)
-end
-
 -- Any ALLIED lane creep within `r` of (x,y)? Keen L2+ auto-conveys to the NEAREST ally, so an allied creep
 -- near the cast point hijacks the landing and cancels when it moves/dies. Jungle has none; matters near lanes.
 local function allied_lane_creep_near(x, y, r)
@@ -2071,7 +2122,7 @@ local function clear_landing(lx, ly, ax, ay, avoid_creeps)
     for i = 0, 6 do
         local f = i / 6
         local x, y = lx + (ax - lx) * f, ly + (ay - ly) * f
-        if walkable_pt(x, y)
+        if Map.WalkablePt(x, y)
            and not (avoid_creeps and allied_lane_creep_near(x, y, K.KEEN_CREEP_CLEAR)) then
             local ok, trees = pcall(function() return Map.TreesInRadius(Map.GroundPos(x, y), K.KEEN_TREE_CLEAR) end)
             if (not ok) or (not trees) or #trees == 0 then return { x = x, y = y } end
@@ -2249,7 +2300,7 @@ local function pair_spot_for(cand)
         if cd.camp ~= cand.camp and cd.center then
             local d = A:Distance(cd.center)
             if d > 200 and d <= pair_max
-               and not is_cleared(camp_key(cd.center)) and d < pd then
+               and not is_cleared(Map.CampKey(cd.center)) and d < pd then
                 partner, pd = cd, d
             end
         end
@@ -2440,21 +2491,6 @@ local function lane_paths()
     return State.lanePaths
 end
 
--- max live member speed of a wave (est waves carry .speed from the mirror; real waves from members).
-local function wave_speed(w)
-    if not w then return nil end
-    -- v0.1.256 arc B re-applied (TINKER_LANE_FREEZE_STUDY.md): the MEASURED displacement beats
-    -- the stat - a body-blocked wave reads 325 by stat while standing still (run-64: mid moved
-    -- <100 u/s for 25% of the run; run-71: five 22-60s stand waits on held waves). Floor 20
-    -- keeps PredictMeeting alive (close > 0), so a HELD wave yields an honest HUGE eta and the
-    -- existing far_wave/slack economics jungle it - no new veto.
-    if w.speed_measured then return math.max(20, w.speed_measured) end
-    if w.speed then return w.speed end
-    local s
-    for _, cc in ipairs(w.creeps or {}) do if cc.speed and (not s or cc.speed > s) then s = cc.speed end end
-    return s
-end
-
 -- v0.1.256 arc B: stamp measured front speeds onto the wave records of a fresh scan. Only
 -- REAL fronts are tracked (a mirrored estimate's front derives from OUR wave - measuring it
 -- is circular); the measurement is capped at the stat (noise cannot exceed the possible).
@@ -2534,7 +2570,7 @@ local function run_lane_scan(arm_overlay)
     do
         local s = lanes.mid
         local ew, aw = s.enemy_wave, s.ally_wave
-        local espd, aspd = wave_speed(ew), wave_speed(aw)
+        local espd, aspd = Lane.WaveSpeed(ew), Lane.WaveSpeed(aw)
         if ew and ew.front and aw and aw.front and espd and aspd then
             local pm = Lane.PredictMeeting({ pos = ew.front, speed = espd }, { pos = aw.front, speed = aspd })
             if pm then kpred = now() + pm.eta end
@@ -2574,6 +2610,70 @@ local function run_lane_scan(arm_overlay)
             if crash == "allyTwr" then
                 State.crashSeen = State.crashSeen or {}
                 State.crashSeen[ln] = now()
+            end
+        end
+        -- v0.1.385 TOWER-THREAT STAMP. USER-WATCHED (g382): three jungle trips while a wave sat on
+        -- our own mid T1. THE CLASH MODEL CANNOT SEE THIS, in two independent ways, and BOTH
+        -- PREDATE v0.1.383, which only ever narrowed WHICH tower gets named:
+        --   1. `crashing` is computed ONLY inside `if moving then` (lib/lane.lua), and `moving`
+        --      needs |b| >= move_threshold 0.1. A wave PARKED at our tower reads push=even/hold,
+        --      which is the most dangerous state there is - it is eating the tower - and it is
+        --      therefore structurally unflaggable. Two of the three g382 episodes are this.
+        --   2. When the contact DOES sit inside a tower's range, opts.tower_weight 4000 is added to
+        --      THAT tower's own side, flipping b and making defend_team the OTHER team, so our
+        --      tower excludes itself. The third episode is this.
+        -- g382 logged allyTwr=0 for the ENTIRE game while e=4 hp=1933 sat 833u off our mid T1 and
+        -- e=6 hp=2408 push=enemy sat 944u off it, both with alH=0, and Tinker took camps at
+        -- t=412.7 and t=496.2. This asks the question the scheduler actually needs straight from
+        -- geometry, and feeds the EXISTING sticky-crash hook instead of inventing a second defend
+        -- pathway - every consumer (:3671, :3873, :4036) and CRASH_STICKY_S already work.
+        -- HOME LANE ONLY, DELIBERATELY. Calibrated over six logs the same rule fires mid 11 / top 7
+        -- / bot 9, and a side-lane defend is a TRIP AWAY FROM MID, which is the v0.1.312 direction
+        -- that costs games (g376 alone would add 7 bot trips). On MID a defend is very nearly the
+        -- shove he already owed, so the cost is near zero. Widen only after this validates.
+        -- Requires a LIVE tower: MapData is static, so a destroyed tower's ground would otherwise
+        -- keep firing for the rest of the game. Same alive idiom as :966 and :2491.
+        -- v0.1.387 STRENGTH GUARD (adversarial review of v0.1.385, CONFIRMED defect). The v0.1.385
+        -- trigger was count + geometry ONLY, with nothing about wave POWER or direction, and it fed
+        -- defend_crash, which lib/schedule.lua runs LAST over thin_wave / far_wave / gone_by_arrival
+        -- and therefore overrides every economic veto. Measured on g383: 12 logged firings, of which
+        -- ONE was a 3-creep wave holding 66 HP in total, and NINE read push=ally, meaning our own
+        -- side was winning at the tower - the opposite of a threat. At t=822.7 a stamp on
+        -- e=3 hp=1104 push=ally bal=3 became the game's only defend 6.3s later and pulled Tinker
+        -- 3.8s across the map, straight off a finished top shove, to March two dying creeps
+        -- (eff_hp 285, under the SHOVE_THIN_EFFHP 400 bar that had correctly vetoed it).
+        -- So: a wave under the thin bar is not a threat, and a wave our side is actively pushing
+        -- AWAY is not a threat. `even/hold` is deliberately KEPT - a wave parked at the tower is
+        -- the dangerous state and is exactly what v0.1.385 was built to see.
+        -- VERIFIED OFFLINE BEFORE SHIPPING, unlike the v0.1.385 calibration: on g382 this holds
+        -- both watched episodes (the parked e=4 hp=1933 and the e=6 hp=2408 push=enemy) while
+        -- dropping 11 stamps to 8; on g383 it drops 19 stamps to 4, all four push=enemy at hp
+        -- 1351-1466, which brings the fire rate back inside the intended band.
+        if ln == K.HOME_LANE and K.TOWER_THREAT_R > 0 and ew and not ew.estimated and ew.front
+           and (ew.count or 0) >= K.TOWER_THREAT_MINC and (s.ally_heroes or 0) == 0
+           and (ew.hp or 0) >= K.SHOVE_THIN_EFFHP
+           and not (s.clash and s.clash.pushing == "ally") then
+            for _, t in ipairs(MapData.TOWERS or {}) do
+                if t.team == State.team and t.pos and t.name and t.name:find("_" .. ln, 1, true) then
+                    local dx, dy = t.pos[1] - ew.front.x, t.pos[2] - ew.front.y
+                    if dx * dx + dy * dy <= K.TOWER_THREAT_R * K.TOWER_THREAT_R then
+                        local live = false
+                        for _, te in ipairs(Map.TowersInRadius(Vector(t.pos[1], t.pos[2], 0), K.TOWER_ALIVE_R) or {}) do
+                            if Entity.GetTeamNum(te) == State.team and Entity.IsAlive(te) then live = true; break end
+                        end
+                        if live then
+                            State.crashSeen = State.crashSeen or {}
+                            State.crashSeen[ln] = now()
+                            if now() - (State.twrThreatLogT or 0) > 2.0 then
+                                State.twrThreatLogT = now()
+                                logline(string.format("tower_threat ln=%s e=%d hp=%d d=%.0f twr=%s modelcrash=%s",
+                                    ln, ew.count or 0, math.floor(ew.hp or 0),
+                                    math.sqrt(dx * dx + dy * dy), t.name, crash))
+                            end
+                            break
+                        end
+                    end
+                end
             end
         end
         -- Piece 1.5 push model: per-lane BALANCE from the attrition sim (bal = net survivors of the
@@ -2764,6 +2864,138 @@ end
 -- Allies for the contest: pos + a FarmPriority value (camp value-contest) + a CORE flag (carry/mid/
 -- offlane via HeroValue.IsCore = role-first, role-tag-base fallback). The lane contest yields to a
 -- core ally or 2+ allies (Note 2); a lone support no longer blocks Tinker's lane.
+-- v0.1.378 THE ALLY-POSITION CLASSIFIER. NO LONGER INERT as of v0.1.382: it writes State.posShadow and
+-- two log lines and NOTHING ELSE READS EITHER. The live `core =` at :2801 is untouched. Its whole job
+-- is to pre-register, before any behaviour ships, exactly which contest verdicts WOULD flip.
+--
+-- WHY IT EXISTS: HeroValue.role() is a stub returning nil (lib/hero_value.lua:222-224), so IsCore
+-- falls through to the KV primary tag, and BOTH Earthshaker and Dazzle key Support 0.45 against
+-- K.CONTEST_CORE_BASE 0.55. In g378 that left Juggernaut the only ally reading core, the Dire offlane
+-- read `contested` 0 times in 28 evaluations (band elsewhere 35-73%), and Tinker made 8 bot
+-- dispatches, 4 of them zero-cast, burning ~164s of a 678s window for 0 gold.
+--
+-- TWO SOURCES, PRIMARY FIRST (operator's architecture):
+--  P1 the ENGINE: Player.GetTeamPlayer(p).starting_position, documented at
+--     uczone-api-v2.0/game-components/core/player.md:142. NEVER CALLED BY THIS PROJECT, so the probe
+--     below is the whole point: if it is populated, the elimination fallback is dead code and this
+--     becomes a three-line read. JOIN VIA Players.GetAll + Player.GetAssignedHero, both documented -
+--     NOT via NPC.GetPlayerOwner, which is undocumented and whose own note says it returns nil for AI
+--     bots, i.e. exactly our games. That undocumented join is how the old "networth reads nil"
+--     finding became unattributable: two unknowns collapsed into one conclusion.
+--  P2 the FALLBACK: constraint elimination over lib/position_data PLAYABLE sets.
+--
+-- THE MID PIN: Tinker holds K.HOME_LANE, so position 2 is struck from every ally pool. That is an
+-- ASSERTION, not a measurement, and it is logged so a mismatch is visible.
+--
+-- THE CORE BIT, and this is the part that matters: the consumer never wants a POSITION. `a.core` has
+-- exactly two readers (:3722, :4678) and both hand the list to Farm.IsContestedByAlly, a first-match
+-- OR of per-ally distance tests that never reads a hero name. So the question is only "does the whole
+-- residual sit on one side of the 3/4 line". That answers the entire {4,5} class without resolving
+-- anything, which is 99.0% of all unresolvable pairs.
+-- AN EMPTY RESIDUAL IS UNDETERMINED, NEVER "not core" (elimination contradiction, ~5% of drafts).
+-- v0.1.379 THE OBSERVED-LANE TALLY (LIVE since v0.1.382, via the stage-2 commit). The operator's own rule, and the half v0.1.378 did not
+-- build: "if a hero is on mid on lane phase alone we can be certain that hero is being played as mid
+-- on that match (this doesn't mean the hero is usually played on mid)".
+-- WHY IT IS NOT OPTIONAL, operator 2026-08-13: "depending on the type of the match it will come
+-- populated and depending it will not. We have both types of match on dota, this is why we've built a
+-- fallback. So we need to have both anyways." A populated starting_position in ONE match type proves
+-- nothing about the types that do not populate it, so the observed path is a permanent peer of the
+-- engine path, not a contingency.
+-- SAMPLING WINDOW t=60..300. NOT earlier: creeps meet around 0:40-1:00 and before that allies are
+-- still walking out, sitting on runes or warding, so a 0:30 snapshot reads travel, not lane. NOT
+-- later: by ~10:00 lane phase is dissolving and a pos-5 starts roaming, which is exactly the drift
+-- that makes a match-level label go stale.
+-- SUSTAINED OCCUPANCY, NOT A SNAPSHOT. Lane._assign_lane is a coarse diagonal band that accepts about
+-- 38 pct of the map and whose mid region contains the ROSHAN PIT and the river centre, so a warding
+-- or Rosh-watching support accumulates mid samples. A single sample is therefore worthless and only a
+-- dominant share over many samples means anything. That same coarseness is why this feeds POSITION
+-- PINNING ONLY and must never reach the contest veto directly - that conflation is the v0.1.312
+-- regression (74 false contested verdicts).
+-- NOTE ON PLACEMENT (v0.1.379): the observed-lane helpers live in lib/position_data.lua as
+-- Pos.ObservedLane and Pos.LaneSlots, and the per-tick tally is INLINED into ally_farm_priorities
+-- below. That is not stylistic. The main chunk sits AT Lua's 200-local ceiling and adding three more
+-- top-level `local function`s threw "too many local variables (limit is 200)" at luac. Pure position
+-- logic belongs in the lib anyway; only the tally needs hero-local State/now/Lane, and it is four
+-- lines at the one site that already has both the ally name and its position in scope.
+-- HEADROOM LIFT WAVE 2 (refactor-only, zero behaviour change): the residual-set solver that used to
+-- sit right here as a top-level `pos_shadow` moved to lib/position_data.lua as Pos.Shadow, for the
+-- same ceiling reason and to join the two helpers above.
+
+-- one-shot engine probe: is starting_position actually populated? pcall'd because every call here is
+-- documented but UNEXERCISED by this project, and a nil-index in the decide path would cost a tick.
+local function pos_probe()
+    if State.posProbed then return end
+    State.posProbed = true
+    local ok, err = pcall(function()
+        for _, p in ipairs((Players and Players.GetAll and Players.GetAll()) or {}) do
+            local h  = Player.GetAssignedHero and Player.GetAssignedHero(p)
+            local nm = h and NPC.GetUnitName and NPC.GetUnitName(h) or "-"
+            local tp = Player.GetTeamPlayer and Player.GetTeamPlayer(p)
+            logline(string.format("apos_probe hero=%s team=%s sp=%s lh=%s nw=%s",
+                tostring(nm),
+                tostring(h and Entity.GetTeamNum and Entity.GetTeamNum(h) or "-"),
+                tostring(tp and tp.starting_position or "nil"),
+                tostring(tp and tp.lasthit_count or "nil"),
+                tostring(tp and tp.networth or "nil")))
+            -- v0.1.380: keep the ENGINE answer when it is real, so the commit below can prefer it.
+            -- A starting_position of 0 or nil means this match type does not ship one.
+            local sp = tonumber(tp and tp.starting_position)
+            if nm ~= "-" and sp and sp >= 1 and sp <= 5 then
+                State.posEngine = State.posEngine or {}
+                State.posEngine[nm] = sp
+            end
+        end
+    end)
+    if not ok then logline("apos_probe FAILED err=" .. tostring(err)) end
+end
+
+-- v0.1.380 THE COMMIT LATCH. Operator: "since we know that the position remains the same for the
+-- rest of the match we have to check, set and not change afterwards." So the assignment is
+-- WRITE-ONCE. State.posFinal is set exactly once per match and every later call is a no-op; there is
+-- no revision path, deliberately, because a label that can flip mid-match is worse than a stale one
+-- (a consumer would see the contest verdict for a lane change under it with no event to explain it).
+-- SOURCE PRECEDENCE: engine starting_position beats the observed+draft fallback, because it is ground
+-- truth where it exists. The fallback is NOT a contingency - the operator's point is that some match
+-- types ship the field and some do not, so both paths are permanent.
+-- LIVE AS OF v0.1.382: State.posFinal IS READ by the core= expression in ally_farm_priorities.
+-- This is no longer an observation-only structure; a wrong bit here now changes lane contest.
+-- v0.1.382: PER-ALLY write-once, not all-or-nothing. Each ally latches the first time its bit is
+-- DETERMINED and is never rewritten; allies still undetermined stay open for a later stage.
+-- WHAT ACTUALLY ENFORCES the operator's set-and-never-change rule: THE nil-GUARD BELOW, nothing else.
+-- CORRECTION, and read this before relaxing anything here. An earlier version of this comment argued
+-- that stage 2 intersects the observed lane INTO the stage-1 residual, so R2 is a subset of R1 and a
+-- determined bit can never reverse. THAT PROOF IS FALSE. `local resid = Pos.Shadow(names)` runs FRESH
+-- at BOTH stages and R1 is never stored anywhere, so the real relation is
+-- R2 = Shadow(names@stage2) intersect LaneSlots, and R2 subset R1 holds only if
+-- Shadow(names@stage2) subset Shadow(names@stage1). Nothing in the code enforces that.
+-- It is nevertheless SAFE, for a different and weaker reason: Shadow is a PURE function of `names`
+-- (lib/position_data.lua, static lookups, no clock/State/engine), so an unchanged roster recomputes
+-- R1 exactly. Measured offline over ~16.1k stable-roster ally-cases: ZERO contradictions of a
+-- stage-1 determined bit. Every contradiction found required the ROSTER to change between stages,
+-- and there the guard below simply keeps the stage-1 answer - which is the better-informed one,
+-- because a shrunk roster means FEWER elimination constraints, i.e. a WIDER residual.
+-- So: the reversal-proofing is the write-once guard, NOT a subset relation. Do not "revise the latch
+-- when the observed lane is strong" on the strength of the old argument - the code cannot support it.
+-- Straddles are still held back to stage 2, because the policy defaults them to CORE while the
+-- observed lane may resolve them to support, and that IS a real flip.
+-- WHY IT MATTERS: the commit used to land only at stage 2, t>=300. The g378 defect episodes this
+-- whole arc exists to fix ran at t=52.4, 142.8, 408.6 and 661.5, so a t=300 latch would have missed
+-- HALF of them. Determined-at-stage-1 covers the early lane phase, which in g380 was all four allies.
+local function pos_commit(src, bits)
+    State.posFinal = State.posFinal or {}
+    local parts = {}
+    for n, v in pairs(bits) do
+        if State.posFinal[n] == nil then
+            State.posFinal[n] = v
+            parts[#parts + 1] = n .. "=" .. tostring(v)
+        end
+    end
+    if #parts == 0 then return end
+    State.posFinalSrc = src
+    table.sort(parts)
+    logline(string.format("pos_commit src=%s n=%d %s", src, #parts, table.concat(parts, " ")))
+end
+
 local function ally_farm_priorities()
     local out, peers = {}, {}
     for _, e in ipairs(Heroes.GetAll() or {}) do peers[#peers + 1] = e end
@@ -2772,13 +3004,152 @@ local function ally_farm_priorities()
             local p = (not Entity.IsDormant(e)) and origin(e) or Hero.GetLastMaphackPos(e)
             if p then
                 local name = (NPC.GetUnitName and NPC.GetUnitName(e)) or nil
+                -- v0.1.382: hoisted out of the constructor so this is a plain lookup per ally, not a
+                -- closure built every decide tick.
+                local pc = State.posFinal and State.posFinal[name]
+                if pc == nil then pc = HeroValue.IsCore(e, name, K.CONTEST_CORE_BASE) end
                 out[#out + 1] = {
                     pos = p,
                     value = HeroValue.FarmPriority({ role = HeroValue.role(e), value = HeroValue.of(e, peers) }),
-                    core = HeroValue.IsCore(e, name, K.CONTEST_CORE_BASE)
-                           or ((State.allyFarmers[name] or 0) >= K.FARMER_CORE_MARKS),   -- v0.1.336: farmer-evidence trumps the role tag (the g336 offlaner-steal; role() is a stub, the base table missed him)
+                    -- v0.1.382 THE WIRING. This is the one behavioural line of the position arc.
+                    -- PRECEDENCE: committed position bit, else today's KV-tag path, then the
+                    -- observed-farmer OR on top of whichever answered.
+                    -- WHY THE POSITION BIT WINS: HeroValue.role() is a stub returning nil, so IsCore
+                    -- falls through to the KV primary tag, and that tag is wrong for exactly the
+                    -- heroes that cost us games - g378's Earthshaker keyed Support 0.45 against
+                    -- CONTEST_CORE_BASE 0.55 while genuinely playing the offlane, the Dire offlane
+                    -- read contested 0 times in 28 evaluations, and Tinker made 8 bot dispatches, 4
+                    -- of them zero-cast, for 0 gold.
+                    -- EXPLICIT nil TEST, NEVER THE and/or IDIOM. `(pc ~= nil and pc) or IsCore(...)`
+                    -- is WRONG: with pc == false, `true and false` is false and the expression falls
+                    -- through to the tag, so the DEMOTION half would silently never fire. That trap
+                    -- already shipped once in this arc (v0.1.381 fixed the same idiom in the shadow
+                    -- bit, where it made SUPPORT unrepresentable), so it is spelled out here.
+                    -- UNDETERMINED IS A LEGAL ANSWER and means "no opinion": nil falls through to
+                    -- exactly today's behaviour, so an unclassified ally can never be worse than
+                    -- v0.1.381. The observed-farmer OR is kept unconditionally because it is MEASURED
+                    -- behaviour (camp confirms), not a label.
+                    core = pc or ((State.allyFarmers[name] or 0) >= K.FARMER_CORE_MARKS),
                 }
+                out[#out].name = name                -- v0.1.378: read by the shadow log AND the commit below
+                -- v0.1.379: the observed-lane tally, inlined here because this is the one site
+                -- that already holds both the ally name and its position, and because the main chunk
+                -- is at the 200-local ceiling (see the NOTE ON PLACEMENT above pos_probe).
+                if name and now() >= 60 and now() <= 300 then
+                    State.posLaneTally = State.posLaneTally or {}
+                    local h = State.posLaneTally[name] or { top = 0, mid = 0, bot = 0, n = 0 }
+                    local ln = Lane._assign_lane({ x = p.x, y = p.y }, { mid_band = 2500 })
+                    if h[ln] then h[ln] = h[ln] + 1; h.n = h.n + 1 end
+                    State.posLaneTally[name] = h
+                end
             end
+        end
+    end
+    -- v0.1.378 SHADOW LOG + COMMIT. Fires ONCE per game, when 4 allies have enumerated (roster
+    -- completeness, not a dwell), or at t>=180 on whatever enumerated. Writes log lines only; the
+    -- `core` field above is already built and is NOT modified here.
+    -- v0.1.379: TWO checkpoints now. Stage 1 at t>=30 is DRAFT ONLY (elimination over the playable
+    -- sets plus the Tinker-holds-mid assertion). Stage 2 at t>=300 re-runs it with the OBSERVED lane
+    -- tally intersected in, which is the operator's own rule and the only path that works in match
+    -- types where the engine ships no starting_position. Logging both is the whole point: the differ
+    -- columns show which source would have changed which verdict, before any of it moves the hero.
+    -- v0.1.382 NEW-MATCH RESET. There is NO OnGameStart/OnGameEnd hook anywhere in this script
+    -- (grep: 0 hits), so nothing clears match-scoped State when a second game starts on the same
+    -- script load. That was harmless while all of this was observation-only, but State.posFinal is
+    -- LOAD-BEARING now: a stale commit from the previous match would classify a completely different
+    -- roster, and State.posLogged being latched would stop the classifier ever re-running. Both
+    -- failures are silent. GetDOTATime restarts near 0 each match, so a large BACKWARD jump is the
+    -- available new-match signal. 30s of slack because the clock is negative during pre-game and the
+    -- first samples land after the horn.
+    if State.posT and now() < State.posT - 30 then
+        State.posFinal, State.posFinalSrc, State.posLogged = nil, nil, nil
+        State.posEngine, State.posLaneTally, State.posProbed = nil, nil, nil
+        logline("pos_reset new_match")
+    end
+    State.posT = now()
+    local stage = ((not State.posLogged) and now() >= 30) and 1
+                  or ((State.posLogged == 1 and now() >= 300) and 2 or nil)
+    if stage then
+        local names = {}
+        for _, a in ipairs(out) do if a.name then names[#names + 1] = a.name end end
+        if #names >= 4 or now() >= 180 then
+            State.posLogged = stage
+            if stage == 1 then pos_probe() end
+            -- v0.1.380: if the engine shipped starting_position for this match type, COMMIT NOW from
+            -- ground truth and never revisit. Positions 1-3 are the cores; 4-5 the supports.
+            if stage == 1 and State.posEngine then
+                local bits, n = {}, 0
+                for _, nm in ipairs(names) do
+                    local sp = State.posEngine[nm]
+                    if sp then bits[nm] = (sp <= 3); n = n + 1 end
+                end
+                if n >= #names then pos_commit("engine", bits) end
+            end
+            local resid = Pos.Shadow(names)
+            if stage == 2 then
+                -- intersect the observed lane's slot set into each residual. INTERSECT, never
+                -- replace: an odd lineup then narrows to EMPTY and reads UNDETERMINED rather than
+                -- confidently wrong, which is the failure direction this whole arc exists to avoid.
+                for _, nm in ipairs(names) do
+                    local h = (State.posLaneTally or {})[nm]
+                    local ln, share = Pos.ObservedLane(h)
+                    logline(string.format("pos_lane name=%s top=%d mid=%d bot=%d n=%d obs=%s share=%.2f",
+                        nm, (h and h.top) or 0, (h and h.mid) or 0, (h and h.bot) or 0,
+                        (h and h.n) or 0, tostring(ln), share or 0))
+                    if ln and resid[nm] then
+                        local slots = Pos.LaneSlots(ln, State.team)
+                        for v in pairs(resid[nm]) do if not slots[v] then resid[nm][v] = nil end end
+                    end
+                end
+            end
+            local commitBits = {}
+            for _, a in ipairs(out) do
+                if a.name then
+                    local raw, rs = Pos.Of(a.name), {}
+                    for v in pairs(resid[a.name] or {}) do rs[#rs + 1] = v end
+                    table.sort(rs)
+                    -- one-sided test; empty residual is UNDETERMINED, never "not core".
+                    -- v0.1.381 BUG FIX, caught by this very log (g379). The previous form was
+                    --   (hasS and not hasC) and false or nil
+                    -- which CANNOT EVER YIELD false: `true and false` is false, and `false or nil`
+                    -- is nil. So every SUPPORT read nil, the policy turned nil into CORE, and the
+                    -- classifier marked the WHOLE TEAM core - precisely the failure that kills
+                    -- side-lane farming. g379 shows it live: Lich resolved to a clean {4} and Bane
+                    -- to a clean {5}, both unambiguous supports, and both still logged bit=nil
+                    -- pol=true. EXPLICIT IF-CHAIN, never the and/or idiom, for any expression whose
+                    -- legitimate value is `false`. This is the same trap the design notes flagged on
+                    -- the eventual `core =` wiring, and it was written here anyway.
+                    local hasC, hasS = false, false
+                    for _, v in ipairs(rs) do if v <= 3 then hasC = true else hasS = true end end
+                    local bit
+                    if #rs == 0 then bit = nil
+                    elseif hasC and not hasS then bit = true
+                    elseif hasS and not hasC then bit = false
+                    else bit = nil end
+                    -- the shipped policy defaults a STRADDLING residual to CORE (measured: on g378
+                    -- that kills the 8 bad bot dispatches and costs nothing, because the other
+                    -- straddler sat in a lane Juggernaut already made contested). An EMPTY residual
+                    -- stays undetermined and must NOT become core.
+                    local pol
+                    if bit ~= nil then pol = bit
+                    elseif #rs > 0 then pol = true
+                    else pol = nil end
+                    logline(string.format(
+                        "pos_shadow stage=%d name=%s set=%s resid=%s bit=%s pol=%s today=%s differ=%d n=%d",
+                        stage, a.name, table.concat(raw, "/"), (#rs > 0) and table.concat(rs, "/") or "-",
+                        tostring(bit), tostring(pol), tostring(a.core and true or false),
+                        ((pol and true or false) ~= (a.core and true or false)) and 1 or 0, #names))
+                    -- v0.1.382: stage 1 commits ONLY DETERMINED bits (see pos_commit: a determined
+                    -- bit cannot reverse at stage 2, a straddle can). Stage 2 commits whatever is
+                    -- still open, applying the straddle policy.
+                    if stage == 1 then
+                        if bit ~= nil then commitBits[a.name] = bit end
+                    elseif pol ~= nil then
+                        commitBits[a.name] = pol
+                    end
+                end
+            end
+            pos_commit(stage == 1 and "draft" or "observed", commitBits)
         end
     end
     return out
@@ -3138,7 +3509,7 @@ local function schedule_ctx(lanes)
     local awv = s.ally_wave
     local pm
     do
-        local espd, aspd = wave_speed(ew), wave_speed(awv)
+        local espd, aspd = Lane.WaveSpeed(ew), Lane.WaveSpeed(awv)
         if ew and ew.front and awv and awv.front and espd and aspd then
             pm = Lane.PredictMeeting({ pos = ew.front, speed = espd }, { pos = awv.front, speed = aspd })
         end
@@ -3203,7 +3574,7 @@ local function schedule_ctx(lanes)
         arrival, asrc = now() + pm.eta, "kin"
         -- v0.1.256 arc B: a held/frozen enemy wave names itself (the measured-speed eta is
         -- already honest - huge - so the far_wave/slack economics own the exclusion).
-        if (wave_speed(ew) or 325) <= K.HELD_CLOSING_MIN then asrc = "held" end
+        if (Lane.WaveSpeed(ew) or 325) <= K.HELD_CLOSING_MIN then asrc = "held" end
     elseif visible then
         arrival, asrc = now(), "vis"          -- visible but front/speed incomplete: it is here
     elseif State.laneWaveT.mid then
@@ -3301,7 +3672,7 @@ local function schedule_ctx(lanes)
         local fwd = not lane_unsafe({ x = crash_pos.x, y = crash_pos.y })   -- 0 enemies in gank radius -> forward; contested -> back
         local _safe
         stand, covers, _safe, cwhy = safe_stand_for(crash_pos, fwd, raidcap, K.HOME_LANE)
-        if not stand then stand = snap_walkable({ x = crash_pos.x, y = crash_pos.y }, crash_pos) end
+        if not stand then stand = Map.SnapWalkable({ x = crash_pos.x, y = crash_pos.y }, crash_pos) end
     end
     -- Risk v2 axis 1 (task #11, user POINT SYSTEM): graded depth points for the STAND, consumed
     -- HERE at decide time only - a busted budget reads covers=false -> Plan no_safe_stand ->
@@ -3480,7 +3851,7 @@ local function side_wave_ctx(lane, s)
     local visible = (ew and not ew.estimated and ew.centroid) and true or false
     local pm
     do
-        local espd, aspd = wave_speed(ew), wave_speed(awv)
+        local espd, aspd = Lane.WaveSpeed(ew), Lane.WaveSpeed(awv)
         if ew and ew.front and awv and awv.front and espd and aspd then
             pm = Lane.PredictMeeting({ pos = ew.front, speed = espd }, { pos = awv.front, speed = aspd })
         end
@@ -3535,7 +3906,7 @@ local function side_wave_ctx(lane, s)
     end
     local arrival, asrc
     if pm and visible then
-        arrival, asrc = now() + pm.eta, ((wave_speed(ew) or 325) <= K.HELD_CLOSING_MIN) and "held" or "kin"   -- v0.1.256 arc B: frozen sides name themselves too
+        arrival, asrc = now() + pm.eta, ((Lane.WaveSpeed(ew) or 325) <= K.HELD_CLOSING_MIN) and "held" or "kin"   -- v0.1.256 arc B: frozen sides name themselves too
     elseif visible then arrival, asrc = now(), "vis"
     elseif stamp_fresh then                                  -- PHASE 2: measured cadence beats the unstamped mirror (mid ladder parity, run-8)
         arrival, asrc = Schedule.NextWaveArrival(now(), K.WAVE_PERIOD, K.WAVE_PHASE, stampT), "stamp"
@@ -4193,7 +4564,7 @@ local function fsm_decide()
             local dl = math.sqrt(dx * dx + dy * dy); if dl < 1 then dl = 1 end
             sx, sy = c.center.x + dx / dl * K.STACK_STAND_DIST, c.center.y + dy / dl * K.STACK_STAND_DIST
         end
-        local st = snap_walkable({ x = sx, y = sy }, { x = c.center.x, y = c.center.y })
+        local st = Map.SnapWalkable({ x = sx, y = sy }, { x = c.center.x, y = c.center.y })
         c.kind = "stack"
         c.standSpot = { stand = Vector(st.x, st.y, c.center.z), aim = Vector(st.x, st.y, c.center.z) }
         c.aggroAt, c.fleeUntil, c.aggroed = first.stackWin.aggro_at, first.stackWin.done, false
@@ -4469,7 +4840,7 @@ local function lane_go(dest, raid)
     if clamped then
         logline(string.format("lane_go clamp (%.0f,%.0f) -> (%.0f,%.0f)", dest.x, dest.y, sdest.x, sdest.y))
     end
-    sdest = snap_walkable(sdest, dest)
+    sdest = Map.SnapWalkable(sdest, dest)
     local sv = Vector(sdest.x, sdest.y, me.z)
     -- v0.1.286 (run-94 9:34/10:50/15:00, user: a blink followed by a keen is a wasted
     -- dagger - "plausible only when returning to base"): a leg whose keen is still
@@ -5429,7 +5800,38 @@ local function fsm_move_wave(s)
         -- fight and the scheduler's own fight-end arrival [asrc=sim = the bal<0 farmable moment,
         -- their remnant emerges] was never consulted by the live tether): eff_s = the earliest of
         -- close-to-stand / the meeting (winning) / the fight end (losing).
-        local sim_s = (s.waveAsrc == "sim") and s.waveEta and math.max(0, s.waveEta - now()) or nil
+        -- v0.1.376: WIDEN THE GATE FROM "sim" TO THE REAL-READ SET. The g371 11:30 defect (12.3s stood
+        -- still while a 175g mid wave died in view, hp 1998 -> 41) is the hole where ALL THREE
+        -- estimators are nil-or-wrong at once: close_s on the wrong ruler, meet_s nil'd by bal=-3 at
+        -- :3464, and sim_s refused because asrc was "held". This obeys the arrival the SCHEDULER
+        -- ALREADY COMMITTED TO (s.waveEta is the frozen d.deadline, :3673 from :3457) instead of
+        -- re-deriving one. At the incident it injects 1.8s (dl=680 against t=677.8) versus
+        -- walk_s+LEAD 5.43, so the branch steps out instead of holding.
+        -- SPELLED kin/held, NOT "any real read": :2187 calls `vis` a real read too, but :3208 sets
+        -- arrival = now() for vis, so admitting it makes this term IDENTICALLY 0, and 0 > walk_s+1.5
+        -- is never true = a silent, total, information-free disable of the whole branch. Measured
+        -- 13 vis rows in 1407 asrc-bearing rows across 7 logs, all in g374, 0 decision changes - rare
+        -- but the failure mode is absolute, so it is excluded by name.
+        -- CANNOT REPRODUCE EITHER PRIOR FAILURE AT THIS SITE, by construction rather than by care:
+        -- eff_s is a math.min and both gates (:5434, :5440) are monotone increasing in it, so a new
+        -- term can only SHRINK eff_s and can only delete holds/releases, never create one. v0.1.369
+        -- failed by making close_s LARGER (math.huge), and it read the stationary-only EMA; this
+        -- reads neither. s.waveEta is an absolute game time so eff_s stays finite and the
+        -- math.floor(eff_s) at :5475 cannot throw.
+        -- THIS IS MITIGATION, NOT A RULER REPAIR, and the distinction is load-bearing for whoever
+        -- reads this next: close_s stays wrong for stamp/grid commits. THE STRUCTURAL DEFECT IS THAT
+        -- THIS BRANCH HAS NO COHERENT TRIGGER AT ALL - safe_stand_for composes the stand exactly
+        -- ANTICIP_RANGED_REACH 810 back from the aim (:1850) and 810 < WAVE_ENGAGE_RANGE 950, so the
+        -- honest "seconds until the wave is castable from my stand" is ZERO permanently. Measured over
+        -- 735 committed wave stands the aim-to-stand gap is median 811, max 1000, and ZERO exceed
+        -- 1437, so a coherent (G-950)/325 is 0 on 99.3% of commits and ceilinged at 0.31s against a
+        -- 1.5s bar. Its own arc; do not "improve the estimate" here again without reading that first.
+        -- HIT RATE, measured before shipping (20 logs, banner-excluded, takeovers excised): 33 of 44
+        -- live holds flip to an immediate step-out (75%), 19 of 22 attributable releases blocked
+        -- (86%), median ~2 changed decisions per game, range 0-13, and SIX of eighteen games change
+        -- nothing. g375 and g376 flip ZERO holds, so a quiet next game proves nothing.
+        local sim_s = (s.waveAsrc == "sim" or s.waveAsrc == "kin" or s.waveAsrc == "held")
+                      and s.waveEta and math.max(0, s.waveEta - now()) or nil
         local eff_s = math.min(close_s, meet_s or math.huge, sim_s or math.huge)
         if eff_s > walk_s + K.STEP_OUT_LEAD then
             -- v0.1.208: same release as the fogged tether (run-33: the last log event was THIS
@@ -5810,6 +6212,41 @@ local function fsm_engage_wave(s)
         engage_replan()
         return
     end
+    -- v0.1.377 THE CASTLESS-ENGAGE WATCHDOG, HOISTED OUT OF THE MARCH-READY BRANCH.
+    -- WHY: the castless-wait release below used to live INSIDE `if ready(State.march)`, so when
+    -- March was on cooldown the timer never even STARTED and ENGAGE had no time-based exit at all.
+    -- Every other stall exit is elsewhere: MOVE_TIMEOUT and the arrival watchdog live in
+    -- fsm_move_wave, and STUCK_TELEPORT is gated to MOVE/RETURN (:6461). g377 t=605.4 (the operator
+    -- watched it at 10:10): a top keen raid arrived with BOTH March charges spent on the camp he had
+    -- just finished, so `w_lead_reject why=march_cd` on both the commit and the arrival, and the hero
+    -- stood 13.4s in ENGAGE issuing ZERO orders for 13.97s, leaving only when the wave died to our
+    -- own creeps (engage_done reason=wave_clear casts=0, keen_waste lane=top held=17.6).
+    -- PROVEN TO FIRE ON THAT DEFECT: at the arrival dref0=848 > W_CAST_REACH 700 with live.n=4, so
+    -- the qualifier was satisfied on the FIRST tick; the release lands ~t=612.7 instead of 622.9,
+    -- about 10s recovered, and the existing suppress-and-replan path sends him to a camp (the same
+    -- path that behaved correctly at t=561.2, wait_end dur=4.1).
+    -- SCOPE IS DELIBERATELY UNCHANGED: same qualifier, same K.W_WAIT_RELEASE_S 4.0, same
+    -- suppress+logline, no new constant, no new state field, and `engage_release reason=w_wait`
+    -- already exists so this is self-reporting. The step-in and the waitInfo stay in the March-ready
+    -- branch below because they are about POSITIONING FOR A CAST, which is meaningless with March
+    -- down. When March IS ready this runs first and, if it does not release, falls through to
+    -- exactly the old behaviour.
+    -- BLAST RADIUS, measured over 83 wave engages that arrived with zero marches cast across
+    -- g370-g377: 65 cast within ~4s and are untouched; 6 cast later (6.0, 22.0, 38.3, 42.3, 46.0s)
+    -- and would be cut, four of which are themselves pathological 22-46s engages; 6 never cast at
+    -- all with span > 4s, including g371's 32.0s stall and g377's 14.1s. About one changed engage
+    -- per game. live is non-nil here (guarded at :5705) and me is the function-level origin.
+    do
+        local wwRef = me:Distance(s.standSpot.aim)
+        if (State.marchCasts or 0) == 0 and (wwRef > K.W_CAST_REACH or live.n < 2) then
+            s.wwT = s.wwT or now()
+            if now() - s.wwT > K.W_WAIT_RELEASE_S then
+                if s.shove then suppress_shove(s.lane, now() + K.SHOVE_STUCK_S, "w_wait") end
+                logline(string.format("engage_release reason=w_wait dref=%.0f n=%d casts=%d", wwRef, live.n, State.marchCasts or 0))
+                engage_replan(); return
+            end
+        end
+    end
     if ready(State.march) then
         -- THE lane W pattern, W-GEOM-2 (v0.1.270/.271, user design, study sec 8): THE CROSS -
         -- ONE builder (march_cross_target), two arms 90 deg apart rotated 45 off the
@@ -5876,12 +6313,10 @@ local function fsm_engage_wave(s)
                         end
                     end
                 end
-                s.wwT = s.wwT or now()
-                if now() - s.wwT > K.W_WAIT_RELEASE_S then
-                    if s.shove then suppress_shove(s.lane, now() + K.SHOVE_STUCK_S, "w_wait") end
-                    logline(string.format("engage_release reason=w_wait dref=%.0f n=%d casts=%d", dref0, live.n, State.marchCasts or 0))
-                    engage_replan(); return
-                end
+                -- v0.1.377: the s.wwT start and the W_WAIT_RELEASE_S release that used to sit HERE
+                -- are hoisted above `if ready(State.march)` (see the watchdog block there). Removing
+                -- them from this branch is what makes the timer run with March on cooldown; leaving
+                -- a second copy would double-start nothing but would hide the hoist from a reader.
                 State.waitInfo = { why = string.format("W wait %d n=%d c=%d", math.floor(dref0), live.n, State.marchCasts or 0), t = now() }
                 return
             end
@@ -5915,7 +6350,7 @@ local function fsm_engage_wave(s)
             local dl = math.sqrt(dx * dx + dy * dy)
             if dl > 1 then
                 for _, step in ipairs({ 500, 800, 1100 }) do
-                    local cand = snap_walkable({ x = me.x + dx / dl * step, y = me.y + dy / dl * step }, me)
+                    local cand = Map.SnapWalkable({ x = me.x + dx / dl * step, y = me.y + dy / dl * step }, me)
                     if cand and not channel_threat_near(cand) then
                         State.rearmStepback = { spot = Vector(cand.x, cand.y, 0), deadline = now() + K.REARM_STEPBACK_S }
                         logline(string.format("rearm_stepback out d=%d threat=%s", step, thr))
@@ -6058,7 +6493,7 @@ local function fsm_engage()
     -- next decide would leave the cache at the pre-engage value).
     local function refresh_value(camp, ctype, center)
         local list = camp_creep_list(camp, ctype, neutrals)
-        State.campSeen[camp_key(center)] = { gold = Farm.GoldValue(list), ehp = Farm.EffectiveHP(list), seen_at = now() }
+        State.campSeen[Map.CampKey(center)] = { gold = Farm.GoldValue(list), ehp = Farm.EffectiveHP(list), seen_at = now() }
     end
     refresh_value(s.camp, s.type, s.center)
     if s.standSpot.paired and s.standSpot.partnerCamp then
@@ -6346,9 +6781,29 @@ local function bottle_tick()
     end
     local lowm = mana() < K.BOTTLE_MANA
     local lowh = (Entity.GetHealth(h) or 1) < (Entity.GetMaxHealth(h) or 1) * K.BOTTLE_HP_FRAC
-    if not (lowm or lowh) then return end
+    -- v0.1.386 THE CONVERSION RUNG (queue item 2, MEASURED not reasoned). effective_mana() counts
+    -- Bottle charges as spendable and the callers gate on it, but try_rearm spends RAW against the
+    -- escape reserve, and this function only ever drank below K.BOTTLE_MANA 200 - so in the whole
+    -- band above 200 the counted charges were UNREACHABLE and the hero refused a rearm he could
+    -- actually pay for. g383 measured 87 refusals: 63 had eff >= need with raw < need, 67 sat at
+    -- raw >= 200 where no drink could ever fire, mean 106 mana (about two charges) left in the
+    -- bottle, and 29 were in ENGAGE. Fountain time was 15.1% of that game.
+    -- So: a rearm refused for mana in the last second, whose gap the charges would actually close,
+    -- counts as low mana. This REUSES the whole existing bottle path - the regen-modifier pacing,
+    -- the channel guard above, and the risk gate below all still apply, and nothing else changes.
+    -- It does not force a rearm; it only makes the mana effective_mana() already promised real.
+    local ch = (Item.GetCurrentCharges and Item.GetCurrentCharges(bottle)) or 0
+    local wantRearm = State.rearmNoFundT and (now() - State.rearmNoFundT) < 1.0
+                      and (State.rearmNoFundGap or math.huge) <= ch * K.BOTTLE_MANA_PER_CHARGE
+    if not (lowm or lowh or wantRearm) then return end
     if enemy_risk_at(origin(State.hero)) >= K.SHOVE_SAFE_RISK then return end -- bottle breaks on enemy damage
-    if cast_no_target(bottle) then logline("bottle drink") end
+    -- v0.1.386: name the cause. `why=rearm` is the NEW rung and is the acceptance signal for the
+    -- conversion fix; lowm/lowh are the pre-existing behaviour and must not change rate.
+    if cast_no_target(bottle) then
+        logline(string.format("bottle drink why=%s raw=%.0f ch=%d gap=%s",
+            (lowm and "lowm") or (lowh and "lowh") or "rearm", mana(), ch,
+            wantRearm and string.format("%.0f", State.rearmNoFundGap or 0) or "-"))
+    end
 end
 
 -- Mana engine part 3 (2026-07-04, Liquipedia-verified): pump the pool from ITEMS before the
@@ -6528,7 +6983,7 @@ local function draw_pair_debug()
     State.fog = enemy_snapshot()                       -- live risk for the merged/split test (works with auto-farm off)
     local camps = {}
     for _, cd in ipairs(Map.Camps() or {}) do
-        if cd.center and not is_cleared(camp_key(cd.center)) then camps[#camps + 1] = cd end
+        if cd.center and not is_cleared(Map.CampKey(cd.center)) then camps[#camps + 1] = cd end
     end
     local pts = {}
     for i = 1, #camps do pts[i] = { x = camps[i].center.x, y = camps[i].center.y } end
@@ -6564,7 +7019,7 @@ local function draw_pair_debug()
     if not nearest then return end
     Draw.Ring(camps[nearest].center, 150, Color(255, 255, 255, 255), 2.6)   -- the camp you are inspecting
     local c   = camps[nearest].center
-    local key = camp_key(c)
+    local key = Map.CampKey(c)
     if key == State.pairDbgKey and now() - (State.pairDbgT or 0) < 2.0 then return end   -- throttle: log on approach / every 2s
     State.pairDbgKey, State.pairDbgT = key, now()
     local verdict = "single reason=no_partner_in_range"
@@ -6788,7 +7243,7 @@ local function debug_camp_scan()
     if #hpts > 0 then
         for _, cd in ipairs(all) do
             if cd.center then
-                local key = camp_key(cd.center)
+                local key = Map.CampKey(cd.center)
                 if not is_cleared(key) then
                     cands[#cands + 1] = { key = key, cx = cd.center.x, cy = cd.center.y }
                 end
@@ -7234,6 +7689,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-if LOG then LOG:info('Tinker brain v0.1.374 (ONE CHANGE: the W1 LEAD pair gets its own hero-to-stand radius, K.W_PRE_LEAD_R 1100, decoupled from K.W_PRE_STAND_R 600. THREE sites, and they must move together: the fire gate, its diagnostic mirror, and prearm_w2. WHY: g374 measured that a 600 bound on the fire gate algebraically caps the effective lead at 600/close, which is 1.85s at creep speed 325, so the v0.1.371 ruler fix LANDED but delivered nothing on ordinary waves (EFFLEAD median 1.90 at close at or above 280, against a 2.02 pre-fix baseline) while genuinely buying a new slow-wave band (2.90 at close under 200). All 15 g374 fires sat at dref at or under 1408. WHY THREE SITES AND NOT THE TWO ORIGINALLY SPECCED: :5520-5543 returns BEFORE the approach walk at :5545, and the only movers inside it are a threat-gated step-back and a delivery walk behind ready(State.march), so leaving prearm_w2 at 600 would fire W1 at dstand about 1090 with NOTHING walking the hero the remaining 490u. Three independent measurements of that frozen closure disagreed (287-455 u/s, 304-313 u/s, and about zero), meaning the W2 delay would be somewhere between zero and unbounded. Moving all three preserves the current invariant that prearm is true the instant W1 fires, and is the SMALLER behavioural delta. Precedent exists for the three-site behaviour and not for the two-site one: g373 fired at dref 1894 and 1899 with tower-clamped stands at dstand 383-596, so prearm was satisfied at cast time and W1 to W2 held at 3.833s across a 784u span of fire distance. NOT INERT, and this was the main risk: the warm-EMA conjunct does NOT block the new band. g374 carries 22 why=stand_far rows at dstand 608-1073 and g373 carries 31, and why= is a first-match chain with stand_far last, so on those rows the position bound is the ONLY refusal. The EMA is fully warm there: g374 shows wgn 95 to 122 over 27 consecutive accepted samples while dstand walks 912 down to 608 at pure creep speed. WHY 1100 IS NOT A TUNED NUMBER: 1090 is W_LEAD_CAP 1900 minus ANTICIP_RANGED_REACH 810, the exact saturation on a collinear unclamped stand, and 1100, 1200 and 1500 are behaviourally identical across the whole corpus. It is the tightest bound at saturation, kept as an off-axis tail guard because the fire gate has no other hero-to-stand bound (four cap-legal corpus rows sit at dstand 1227-1538). The operative bound is really the min of W_PRE_LEAD_R, W_LEAD_CAP minus the stand gap, and 810 plus W_LEAD_S times close, so 1100 is rarely the binding term: that is the design, not a defect. COVERAGE IS NOT AT RISK: the meet is timed 810 forward of the CAST POINT and the cast clamps to 280 from the hero, and 810 is under MARCH_HALFWIDTH 900, so meet coverage does not depend on hero-to-stand distance. W_PRE_STAND_R STAYS 600 on its four remaining sites: the approach-stop pair, the fog pre-cast, and the timed arrival trigger whose target lead is ZERO by design. Raising THAT one is refuted because the approach-stop is the walk-stop and it would park the hero outside MARCH_REACH 1150. CORRECTED PREDICTION, and the earlier one was wrong: replay gives mean effective lead 3.02 to 3.11s and max 3.57s, NOT the 3.38 to 3.67s first claimed; only the three cap-bound episodes reach the higher band. EXPECT A CLASS THAT LOOKS NEW: in 3 of the 6 g374 episodes there is no W1 lead cast today AT ALL, because the EMA is wiped by the hero own motion before he reaches 600 and the wave takes an at-arrival cast instead, so those convert from zero lead to roughly 2.6 to 3.3s of lead. Do not misread that as the bot casting where it never used to. ACCEPTANCE IS WATCHED BEHAVIOUR: W1 goes out while the wave is still visibly up-lane, and the robot stream and the creeps arrive at the same spot together; the hero should stop walking forward EARLIER in the approach than he does today. REVERT ON ANY OF: the hero fires W1 far out and then stands still for a beat before the rearm animation starts (that is the prearm split, and if it appears even with three sites the change is wrong); robots sweeping empty ground while the wave walks through where the stream already expired; waves getting only ONE W where they get two today; or the hero parked further back while the wave crashes past him and last hits go to our tower or our creeps. DO NOT SCORE THIS WITH THE ACCEPTANCE TEST IN TINKER_G374_FINDINGS.md, WHICH IS DEAD: its first clause is the fire bar with the edited term deleted, so the median collapses from 492 to about 10 by construction, and its second clause keys on 1410, which is 810 plus the PRE-EDIT constant, and is already cleared by three of four unfixed builds (g371 76.9 pct, g372 53.3 pct, g373 55.6 pct). RED and GREEN are unordered disjunctions there and both fire on g373, so it would hand back a false GREEN. The 106u same-build noise floor it cites is REFUTED as well: g370 is v0.1.366 and g371 is v0.1.368, so that pair was never same-build, and thirteen genuinely byte-identical pairs give p50 55.2u with max 120.2u and 31 pct exceeding 106u. RIDER, LOG-ONLY: dstand is appended to the march_aim src=shove_pre row, because it is the only field that separates a fire caused by the new bound from a game where the stand was tower-clamped, and it cannot be reconstructed as dref minus 810 (the gap runs 808-1881 in g374 and 810-1196 in g373, max error 1420u). Appended at the end so the analyzer kv parse is unaffected. RESIDUAL RISK ACCEPTED: the rearm channel now starts up to about 490u further back than any logged rearm, which no game has done yet. Suite 832/0, libs untouched. Prior build was v0.1.373. Reviewed by a 44-agent workflow: 7 premise checks (0 confirmed clean, 6 partial, 1 refuted), 6 attack lenses, per-finding adversarial refutation, synthesis.)') end
+if LOG then LOG:info('Tinker brain v0.1.388 (LOG-ONLY, ZERO behaviour: a SHARED-LIB TRIPWIRE, from a field crash report. A user hit attempt to call a nil value, field DepthRuler, at Tinker dot lua line 599 inside stand_depth, thrown from OnUpdateEx, i.e. EVERY DECIDE. IT IS NOT A CODE BUG AND NOTHING IN THIS TREE CAUSED IT: Lane.DepthRuler has existed since v0.1.327, this session never touched it, and it is present in the repo, in the deployed copy and in the public mirror. IT IS A PACKAGING FAULT. C:/Umbrella/scripts/lib is ONE directory shared by every hero package a user installs, and the public dota-hero-brains package ships lib/lane.lua at 410 lines against this tree 930. Installing that package overwrites the shared lib with an older copy and strips functions this hero calls. Measured across the two public repos: 18 of the 26 libs they BOTH ship DIFFER, and the Tinker mirror calls 25 functions those older copies do not define, spread over five libs, so repairing one symbol only uncovers the next. The reverse direction is safe: the Lina and Sniper sources have no call sites that the newer libs lack, so the correct repair is to replace the WHOLE lib directory with the one shipped alongside Tinker.lua, never a single file. THE TRIPWIRE: at load, check one or two of the NEWEST exports per shared lib, which is what a stale copy loses first, and if any is missing emit ONE line naming every missing symbol and the cause. It is a SENTINEL, not a contract, it is LOG-ONLY, and it deliberately does NOT disable the brain: the point is to put an actionable line at the top of the log instead of an unreadable per-tick traceback that names Tinker.lua and blames the wrong file. VERIFIED BY EXECUTION, not by reading: replicated against three trees offline. It stays CLEAN on this repo and on the deployed copy, and TRIPS with 9 entries on the stale public tree, including exactly the Lane.DepthRuler that was reported. Note the offline harness also reports escape and geometry as not loading, which is an artifact of running outside the engine because geometry dot lua line 103 and target dot lua line 17 index the engine global Enum at load; in game those are live tables the hero already holds, so the shipped check cannot false-alarm on them. Suite 842 of 842, libs untouched, hero-only deploy, rollback Tinker.lua.bak.387. Prior build was v0.1.387.)') end
 
 return callbacks

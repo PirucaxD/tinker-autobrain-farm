@@ -818,6 +818,48 @@ describe("lib/lane -- PredictClash", function()
         local cl = Lane.PredictClash(e, a, towers, OPTS)
         assert_false(cl.crashing, "settle short of the tower -> not crashing")
     end)
+
+    -- v0.1.383 regression trio. The pick scored ONLY the projection along drift_dir with no
+    -- perpendicular bound, so a tower anywhere sideways won on a tiny projection. The travel
+    -- budget is drift_coeff * |b| * creep_speed * horizon, so `along` can never exceed ~975 at
+    -- shipped constants - yet the logged contact-to-tower distance ran a median 3212 (g380) and
+    -- 96.8-97.2% of every crash stamp in the two most recent games named a tower the drift
+    -- cannot physically reach. The corrected rule is one proximity test: the tower must lie
+    -- within its OWN attack range of the drift segment [contact, settle].
+    it("a tower OFF the drift axis is not in the path however small its projection", function()
+        local e = wave(3, 100, 0, 2000)   -- contact (0,0), drift (-1,0), travel budget ~814
+        local a = wave(2, -100, 0, 100)
+        -- along = 100 (inside the budget, so the old rule selected it) but 5000 units sideways.
+        -- Kept 5001 from the contact so it adds no tower_weight and cannot flip the push.
+        local towers = { { pos = { x = -100, y = 5000 }, team = 2, range = 700, alive = true } }
+        local cl = Lane.PredictClash(e, a, towers, OPTS)
+        assert_eq(cl.pushing, "enemy", "scenario intact: enemy still pushing")
+        assert_false(cl.crashing, "a tower 5000 units off the drift axis is not crashed into")
+        assert_true(cl.crash_tower == nil, "and it must not be named as the crash tower")
+        assert_true(cl.settle.x < -800, "settle must NOT be clamped to the off-axis tower line, got " .. cl.settle.x)
+    end)
+
+    it("a tower BESIDE the drift path, inside its own range, still crashes", function()
+        -- guards the fix against over-tightening: perp 400 <= range 700 -> still in the path.
+        local e = wave(3, 100, 0, 2000)
+        local a = wave(2, -100, 0, 100)
+        local towers = { { pos = { x = -700, y = 400 }, team = 2, range = 700, alive = true } }
+        local cl = Lane.PredictClash(e, a, towers, OPTS)
+        assert_true(cl.crashing, "wave passes within the tower's attack range -> crashing")
+        assert_true(cl.settle.x <= -699 and cl.settle.x >= -701, "clamped to the tower line ~-700, got " .. cl.settle.x)
+    end)
+
+    it("a tower just past the settle, inside its own range, crashes without dragging the settle", function()
+        -- a wave crashes a tower when it enters that tower's ATTACK RANGE, not when it reaches the
+        -- tower's exact point. Budget ~814, tower at 1200 -> within 700 of the settle.
+        local e = wave(3, 100, 0, 2000)
+        local a = wave(2, -100, 0, 100)
+        local towers = { { pos = { x = -1200, y = 0 }, team = 2, range = 700, alive = true } }
+        local cl = Lane.PredictClash(e, a, towers, OPTS)
+        assert_true(cl.crashing, "settle lands inside the tower's range -> crashing")
+        assert_true(cl.settle.x >= -815 and cl.settle.x <= -813,
+            "settle stays at the travel budget, never dragged past it, got " .. cl.settle.x)
+    end)
 end)
 
 describe("lib/lane -- InterceptETA + NearestTeleportAnchor", function()
@@ -947,6 +989,34 @@ describe("lib/lane -- BuildLaneStates", function()
         assert_eq(bot.enemy_heroes, 1); assert_eq(bot.ally_heroes, 1)
         assert_true(bot.clash ~= nil, "clash predicted")
         assert_true(lanes.top ~= nil and lanes.mid ~= nil, "all three lanes present")
+    end)
+
+    it("crash tower comes from THIS lane, not a nearer-projecting off-lane tower", function()
+        -- v0.1.375 regression. PredictClash clamps the drift at the nearest defending tower AHEAD,
+        -- scored by projection ALONG drift_dir with no perpendicular bound. Passing the full tower
+        -- list let a tower in another lane win purely by projecting closer, which is how 60-77% of
+        -- every real game's crash stamps named an off-lane tower (g374: 156 of 224).
+        local creeps = {
+            c(5000,0,3), c(5100,0,3), c(5200,0,3),   -- enemy bot wave (stronger -> drift toward ally front)
+            c(4600,0,2), c(4700,0,2),                -- ally bot wave
+        }
+        -- Geometry: contact=(4850,0), drift=(-1,0), travel budget 195. Selection scores ONLY the
+        -- projection along drift, with no perpendicular bound, so this tower wins on along=100 while
+        -- sitting 7000 units OFF the lane axis. That is exactly the real signature: ctd (the
+        -- contact->tower EUCLIDEAN distance) reads median 8087 in g374 while travel can never exceed
+        -- ~975, so the selected tower is nowhere near the wave.
+        -- NOTE the tower must stay far from contact: PredictClash also adds opts.tower_weight (4000)
+        -- to a NEARBY tower's own team strength, and a close ally tower flips b negative, making the
+        -- ENEMY the defending team and voiding the whole scenario. 7000 out is safely past that.
+        local offLane = { pos = {x=4750,y=7000}, team = 2, range = 700, alive = true }  -- x-y=-2250 -> mid
+        local opts = { team = 2, enemy_push = {x=-1,y=-1}, ally_push = {x=1,y=1},
+                       cluster_radius = 600, mid_band = 2500, hero_radius = 1200 }
+        local bot = Lane.BuildLaneStates(creeps, { offLane }, {}, opts).bot
+        assert_true(bot.clash ~= nil, "clash predicted on bot")
+        local ct = bot.clash.crash_tower
+        assert_true(ct == nil or Lane._assign_lane(ct.pos, opts) == "bot",
+            "bot lane may only crash into a BOT tower; got one in lane " ..
+            (ct and Lane._assign_lane(ct.pos, opts) or "-"))
     end)
 
     it("computes intercept when anchors + kinematics are supplied", function()
@@ -5856,6 +5926,49 @@ end)
 ----------------------------------------------------------------------------
 -- REPORT
 ----------------------------------------------------------------------------
+
+-- v0.1.379: the observed-lane helpers. These gate a match-level position label, and a wrong label
+-- flips IsCore, so the two guards (minimum samples, dominant share) are the load-bearing part.
+describe("lib/position_data -- observed lane", function()
+    local Pos = require("lib.position_data")
+
+    it("needs sustained samples: below the minimum count returns nil", function()
+        assert_true(Pos.ObservedLane({ top = 11, mid = 0, bot = 0, n = 11 }) == nil,
+            "n=11 is under the 12 floor and must not resolve")
+    end)
+
+    it("needs dominance: a split tally returns nil even with plenty of samples", function()
+        assert_true(Pos.ObservedLane({ top = 11, mid = 9, bot = 0, n = 20 }) == nil,
+            "55% share is under the 0.60 bar (a support passing through mid must not win it)")
+    end)
+
+    it("resolves a dominant lane", function()
+        assert_eq(Pos.ObservedLane({ top = 16, mid = 4, bot = 0, n = 20 }), "top")
+    end)
+
+    it("maps lanes to slots per team: safelane is bot for Radiant, top for Dire", function()
+        assert_true(Pos.LaneSlots("bot", 2)[1] and Pos.LaneSlots("bot", 2)[5], "Radiant bot = safelane {1,5}")
+        assert_true(Pos.LaneSlots("top", 3)[1] and Pos.LaneSlots("top", 3)[5], "Dire top = safelane {1,5}")
+        assert_true(Pos.LaneSlots("bot", 3)[3] and Pos.LaneSlots("bot", 3)[4], "Dire bot = offlane {3,4}")
+        assert_true(Pos.LaneSlots("mid", 2)[2], "mid = {2}")
+    end)
+
+    it("g378: the observed offlane promotes Earthshaker to a core-side residual", function()
+        -- Tinker is Dire, so bot is the offlane. Earthshaker's draft residual {3,4} intersected with
+        -- the offlane slots stays {3,4}: both on the core side of the 3/4 line under the ship policy.
+        local slots, kept = Pos.LaneSlots("bot", 3), {}
+        for _, v in ipairs({ 3, 4 }) do if slots[v] then kept[#kept + 1] = v end end
+        assert_eq(#kept, 2, "offlane keeps {3,4}")
+    end)
+
+    it("a contradiction narrows to EMPTY, which must read undetermined not not-core", function()
+        -- Dazzle is {5} but was observed in the offlane {3,4}: the intersection is empty. The
+        -- consumer contract is that empty means UNDETERMINED and falls through to today's path.
+        local slots, kept = Pos.LaneSlots("bot", 3), {}
+        for _, v in ipairs({ 5 }) do if slots[v] then kept[#kept + 1] = v end end
+        assert_eq(#kept, 0, "empty residual, caller must treat as undetermined")
+    end)
+end)
 
 print()
 print(string.format("%d passed, %d failed", pass, fail))
