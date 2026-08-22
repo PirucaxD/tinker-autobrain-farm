@@ -272,9 +272,9 @@ end)
 local Farm = require("lib.farm")
 local Map  = require("lib.map")
 local Lane = require("lib.lane")
-local Route = require("lib.route")
+local Route = require("lib.lane").Route      -- v0.1.395: absorbed into lane (phase 1)
 local Nav = require("lib.nav")
-local Schedule = require("lib.schedule")
+local Schedule = require("lib.lane").Schedule -- v0.1.395: absorbed into lane (phase 1)
 
 describe("lib/farm , pure geometry (v0.5.82)", function()
     local function u(x, y, hp) return { pos = { x = x, y = y, z = 0 }, hp = hp or 100 } end

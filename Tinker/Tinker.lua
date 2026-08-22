@@ -17,7 +17,7 @@ if package and package.loaded then
     -- mid-session hot-reload gave SEVEN modules (timing, towers, hero_data, ability_data,
     -- threat_data, draw, vision) a fresh wrapper over a stale cached dependency. Known since the
     -- Tier-6 audit; fixed at CURRENT names before any consolidation renames land on top.
-    for _, m in ipairs({ "lib.map", "lib.farm", "lib.lane", "lib.route", "lib.nav", "lib.schedule",
+    for _, m in ipairs({ "lib.map", "lib.farm", "lib.lane", "lib.nav",
                          "lib.escape", "lib.hero_value", "lib.geometry", "lib.map_data", "lib.channel_gate",
                          "lib.defense", "lib.item_saves", "lib.target", "lib.position_data",
                          "lib.timing", "lib.towers", "lib.hero_data", "lib.ability_data",
@@ -31,11 +31,9 @@ local Timing    = require("lib.timing")   -- v0.1.334: the arrival-watchdog rule
 local HeroValue = require("lib.hero_value")
 local MapData   = require("lib.map_data")   -- static positions fallback (camps/towers/outposts/fountains)
 local Lane      = require("lib.lane")        -- lane intel (waves + clash + intercept), Task C foundation
-local Route     = require("lib.route")       -- farm-route planner (Stage 0: diagnostic only)
 local Nav       = require("lib.nav")          -- lane nav chokepoint (Piece 0): SafeDest clamp + transport ladder
 -- (lib.shove + lib.farm_decide were CONDENSED into lib.farm 2026-07-01 - cohesive domain libs, like
 -- C's math.h: Farm.CrashCast / Farm.MarchCovers / Farm.OutsideTowerRange.)
-local Schedule  = require("lib.schedule")     -- timing-anchored shove-cycle controller (ClearTime + Plan)
 local Escape    = require("lib.escape")        -- fog-aware proximity risk (COR-1)
 local Geometry  = require("lib.geometry")      -- pure geometry: teleport reach-disc landing (Keen/BoT)
 local Towers    = require("lib.towers")        -- v0.1.246: per-tower alive flag + measured hp-slope death eta
@@ -68,10 +66,13 @@ local Pos       = require("lib.position_data") -- v0.1.378, LIVE since v0.1.382:
 -- point is to put one actionable line at the top of the log instead of a per-tick traceback.
 do
     local need = {
-        ["lib/lane.lua"]          = { Lane,     "Lane",     { "DepthRuler", "PushForecast" } },
+        -- v0.1.395: lane absorbed route+schedule (phase 1 of the consolidation). The lane entry
+        -- carries ABSORBED-LIB sentinels (dotted paths, resolved below) so a restored PRE-merge
+        -- lane.lua - which passes the flat sentinels by design - fails loudly at load instead of
+        -- nil-crashing the hero every decide.
+        ["lib/lane.lua"]          = { Lane,     "Lane",     { "DepthRuler", "PushForecast", "Route.Plan", "Schedule.CycleFill" } },
         ["lib/farm.lua"]          = { Farm,     "Farm",     { "CrashCast", "ObservedFarmers" } },
         ["lib/escape.lua"]        = { Escape,   "Escape",   { "CommitWiden", "NearestEnemyEdge" } },
-        ["lib/schedule.lua"]      = { Schedule, "Schedule", { "CycleFill" } },
         ["lib/geometry.lua"]      = { Geometry, "Geometry", { "DiscReachPoint" } },
         ["lib/nav.lua"]           = { Nav,      "Nav",      { "SafeDest" } },
         ["lib/position_data.lua"] = { Pos,      "Pos",      { "Shadow" } },
@@ -83,7 +84,9 @@ do
             bad[#bad + 1] = file .. " (module did not load)"
         else
             for _, fn in ipairs(fns) do
-                if type(mod[fn]) ~= "function" then
+                local cur = mod
+                for part in fn:gmatch("[^%.]+") do cur = (type(cur) == "table") and cur[part] or nil end
+                if type(cur) ~= "function" then
                     bad[#bad + 1] = file .. " is missing " .. name .. "." .. fn
                 end
             end
@@ -296,7 +299,7 @@ local K = {
     TOWER_THREAT_MINC    = 3,                        -- v0.1.385: minimum enemy creep count for the tower-threat stamp. CORRECTED at v0.1.387: the claim that 4 misses an episode was FALSE. At MINC 4 BOTH catchable g382 episodes still fire; all 4 drops is one scan fragment INSIDE episode 1. So 3 is not a calibrated floor, it is simply the looser of two settings that behave the same on the corpus. The real over-fire control is the v0.1.387 strength guard below, not this count.
     CRASH_STICKY_S       = 10.0,                  -- run-76: a crash-our-tower flag seen by the 2s scan counts as crashing for this long (the instantaneous flag flickers mid-fight; decides sampled false instants and the 415g bot T2 wave went undefended)
     REARM_STEPBACK_S     = 4.0,                      -- run-78: a wave engage whose Rearm the gate blocks walks OUT of the gating enemy's reach for up to this long to rearm there (keeps the wave); expiry falls through to the .262 bail
-    DISPATCH_HP_MIN     = 0.50,                      -- case-file #2 (run-72 t=445): a due shove below this HP fraction recovers first - PANIC_HP 0.40 fires on arrival otherwise (keen + ~50s donated); fed to Schedule.Plan as ctx.min_hp_frac
+    DISPATCH_HP_MIN     = 0.50,                      -- case-file #2 (run-72 t=445): a due shove below this HP fraction recovers first - PANIC_HP 0.40 fires on arrival otherwise (keen + ~50s donated); fed to Lane.Schedule.Plan as ctx.min_hp_frac
     LASER_MANA_FB       = 95,                         -- Laser mana fallback (Liquipedia ~95-120); abil_mana reads the real cost, this is only used if that read fails
     LASER_DMG           = { 75, 150, 225, 300 },      -- pure damage per Laser level (lib/ability_data, KV/Liquipedia-verified). PURE = ignores armor + magic resist, so a neutral is last-hittable iff its CURRENT hp <= this.
     MANA_REGEN_FALLBACK = 4.0,                       -- if NPC.GetManaRegen read fails
@@ -310,7 +313,7 @@ local K = {
     RISK_CONTESTED_CAMPS = { { -4797, -104 }, { 4099, 63 } },   -- the mid-river ancients, contested by both teams (calibrate from the overlay)
     -- Note 1 (lane-wave timing + crash/push):
     WAVE_PERIOD         = 30,                            -- creep waves spawn every 30s (Liquipedia)
-    WAVE_PHASE          = 21,                             -- v0.1.366 RECALIBRATED 14 -> 21 (TINKER_LANE_CLOCK_V3_PLAN.md task 4, redirected). The old 14 came from n=8 arrivals in one game; `--lane-report` has printed "observed spawn-grid phase: median 18.4-19.6 (K.WAVE_PHASE calibration; current 14)" on EVERY log since, and nobody moved the constant. Re-measured over 527 mid arrivals in 30 logs: median 18.6, and top/bot agree (19.3/18.3), so ONE constant is right for all three lanes. WHY 21 AND NOT 18.9: Schedule.NextOnGrid returns strictly > now, so a phase set EARLY of the true arrival rolls a WHOLE 30s period (catastrophic) while one set LATE is wrong only by the offset (cheap) - the cost is asymmetric, so the constant sits ~2s late of the median. Leave-one-out over 495 arrivals (each game scored with the OTHER games' median, never its own): phase 14 -> 79% of predictions >10s wrong, median |err| 23.2s; phase ~21 -> 17%, median |err| 2.1s. ponytail: a fixed constant beats a per-lane EMA here because arrival jitter (p10-p90 spread 8.9s on mid, far worse on the sides) is larger than the drift it would track - a single observation is a noisy sample of a metronome. Upgrade path if the sides ever need their own: per-lane phases, measured the same way.
+    WAVE_PHASE          = 21,                             -- v0.1.366 RECALIBRATED 14 -> 21 (TINKER_LANE_CLOCK_V3_PLAN.md task 4, redirected). The old 14 came from n=8 arrivals in one game; `--lane-report` has printed "observed spawn-grid phase: median 18.4-19.6 (K.WAVE_PHASE calibration; current 14)" on EVERY log since, and nobody moved the constant. Re-measured over 527 mid arrivals in 30 logs: median 18.6, and top/bot agree (19.3/18.3), so ONE constant is right for all three lanes. WHY 21 AND NOT 18.9: Lane.Schedule.NextOnGrid returns strictly > now, so a phase set EARLY of the true arrival rolls a WHOLE 30s period (catastrophic) while one set LATE is wrong only by the offset (cheap) - the cost is asymmetric, so the constant sits ~2s late of the median. Leave-one-out over 495 arrivals (each game scored with the OTHER games' median, never its own): phase 14 -> 79% of predictions >10s wrong, median |err| 23.2s; phase ~21 -> 17%, median |err| 2.1s. ponytail: a fixed constant beats a per-lane EMA here because arrival jitter (p10-p90 spread 8.9s on mid, far worse on the sides) is larger than the drift it would track - a single observation is a noisy sample of a metronome. Upgrade path if the sides ever need their own: per-lane phases, measured the same way.
     WAVE_WAIT_GRACE     = 8,
     WAVE_WAIT_GRACE_VIS = 4,                               -- v0.1.222: AT the stand (vision up-lane) an arriving wave shows ~4s before eta - an invisible one past eta+this is a phantom; bail early. Calibrate vs the prediction-late median (~3-7s).                               -- at the wave stand, wait until waveEta + this for the creeps to arrive before re-asking the schedule. Calibrate.
     -- P0 move watchdog: bail a stand we are not closing toward (bad keen landing / unwalkable), so a far
@@ -375,7 +378,7 @@ local K = {
 State.fsm          = "DECIDE"
 State.laneWaveT    = {}    -- PHASE 2 (TINKER_SIDE_ANTICIPATION_DESIGN.md): per-lane cadence anchors {mid=,top=,bot=} - game-time a wave was last cleared at that lane's shove point. Mid consumers read .mid (the old lastWaveT, unchanged semantics); side entries feed side_wave_ctx stamp anticipation. v0.1.303 D-B: ALSO stamped at every wave_engage_arrived (arrivals were only stamped by 2 of ~6 exits - one imperfect wave regressed the clock to kinest).
 State.laneMeet     = {}    -- v0.1.303 LANE-CLOCK D-A (TINKER_LANE_SCHEDULING_STUDY.md): per-lane last OBSERVED arrival ground {x=,y=,t=}, stamped at wave_engage_arrived. THE fogged anchor: a fogged lane-phase wave dispatches to where waves actually arrive, never to the mirror-kinematic guess (err 300-1400u = 40 geometry-vetoes runs 104-107 + 3/5 baseline misses run-108).
-State.shoveLeaveBy = nil   -- leave-by deadline set by Schedule.Plan when a camp is picked (preemption)
+State.shoveLeaveBy = nil   -- leave-by deadline set by Lane.Schedule.Plan when a camp is picked (preemption)
 State.schedSlack   = nil   -- slack budget handed to the jungle planner
 State.marchCasts   = 0
 State.nextDecide   = 0
@@ -383,7 +386,7 @@ State.nextOrder    = 0
 State.panicUntil   = 0
 State.channelUntil = 0
 State.keenedSpot   = false   -- one Keen hop per committed spot, then walk
-State.cyclePark    = nil     -- v0.1.339 THE CYCLE ARC: a committed park window { untilT, x, y } - fsm_decide short-circuits to this posture until the scheduler wants action (terminal gate right after Schedule.Plan); set only in the none block on a funded reason=slack window
+State.cyclePark    = nil     -- v0.1.339 THE CYCLE ARC: a committed park window { untilT, x, y } - fsm_decide short-circuits to this posture until the scheduler wants action (terminal gate right after Lane.Schedule.Plan); set only in the none block on a funded reason=slack window
 State.shoveSuppress = { mid = 0, top = 0, bot = 0 }  -- Note 1 + ALL-LANES v0.1.225: after a shove got stuck (crash stand unreachable / tether release), recover instead of re-keening THAT LANE until this time; per-lane so a stuck side stand never suppresses mid
 State.releaseSuppress = { mid = 0, top = 0, bot = 0 }  -- v0.1.252: tags a suppression as TETHER-RELEASE-created; release_cancel may only undo THESE (run-65: it canceled UNSAFE-abort safety windows -> shove/abort ping-pong vs 2 heroes; run-67: 2 of 3 cancels undid BUDGET delivery windows = the v0.1.197 3rd-W class)
 State.dumped       = false   -- one-shot position-dump guard
@@ -1321,7 +1324,7 @@ end
 -- the STAIRS line OFF them: clamping movement/stands at the line was a hard positional veto -
 -- it parked the hero AT the line for 22-25s waits (the exact freeze the point-system doctrine
 -- forbids). The line is now an EXCLUSION input: safe_stand_for composes the NATURAL stand and
--- reports covers=false when that stand sits past WALK_DEPTH_MAX (non-raid), so Schedule.Plan
+-- reports covers=false when that stand sits past WALK_DEPTH_MAX (non-raid), so Lane.Schedule.Plan
 -- routes the wave to jungle (no_safe_stand / gone_by_arrival). Movement itself is never
 -- depth-clamped again - a committed stand is always legal or the commit never happened.
 -- (lane_pos_ok deleted at v0.1.193: with the depth term gone it was a tower_safe alias.)
@@ -2570,7 +2573,7 @@ local function run_lane_scan(arm_overlay)
     -- phase), ExpectedWave hp truth at est->real transitions, and meeting drift. The old prose
     -- format was not machine-parseable (the analyzer splits strict k=v); the overlay is unaffected
     -- (it draws from State.laneScan).
-    local pred = Schedule.NextWaveArrival(now(), K.WAVE_PERIOD, K.WAVE_PHASE, State.laneWaveT.mid)
+    local pred = Lane.Schedule.NextWaveArrival(now(), K.WAVE_PERIOD, K.WAVE_PHASE, State.laneWaveT.mid)
     -- Piece 1.5: KINEMATIC arrival candidate on trial next to the spawn-grid pred. With the mirror,
     -- both mid fronts (real or mirrored) + live-read speeds exist, so the meeting ETA is pure
     -- kinematics - no spawn-clock guess. --lane-report judges pred vs kpred head-to-head; the
@@ -2816,7 +2819,7 @@ end
 -- whole mana pool (~459), so no hop would ever be affordable -> the planner would loop on the refill
 -- node. Running out mid-clear is handled by the in-engage mana bail.
 -- v0.1.360: `full_clear` is OPT-IN and only the two SHOVE producers pass it. The third caller is
--- NOT a commit gate at all - it is the fountain TRIGGER (broke_bar -> Schedule.CycleFill), and
+-- NOT a commit gate at all - it is the fountain TRIGGER (broke_bar -> Lane.Schedule.CycleFill), and
 -- repricing it here would raise that trigger from the one-hop bar to the full-clear bar, which is
 -- the v0.1.339 change this project measured at GPM 489 -> 356 and reverted with v0.1.340. Offline
 -- replay of the first cut: 30-44% of lane-phase PARK decides flipped to a fountain trip, against a
@@ -3323,7 +3326,7 @@ local function gather_route_targets(allies, our_pri)
     -- again. The window's to-deadline makes a late start uncollectable (timeline-exact); the
     -- wave's Tier-1 dispatch + leave_by preempt outrank the maneuver (waves always win).
     if State.menu.stackLarge and State.menu.stackLarge:Get() then
-        local win = Schedule.StackWindow(now(), { aggro_sec = K.STACK_AGGRO_SEC })
+        local win = Lane.Schedule.StackWindow(now(), { aggro_sec = K.STACK_AGGRO_SEC })
         -- v0.1.338 (user doctrine, g339): stacking is a CONVENIENCE, not a necessity - the node
         -- emits only when the hero is ALREADY near the camp (component math: c.center is a plain
         -- table, the type-boundary law). g339's cross-map dispatch (an empty plan's only node)
@@ -3375,7 +3378,7 @@ local function run_route_scan()
     local allies = ally_farm_priorities()          -- FarmPriority-scaled (matches our_pri)
     local our_pri = our_farm_priority()
     local targets = gather_route_targets(allies, our_pri)
-    local plan = Route.Plan(targets, route_hero_state(), route_opts())
+    local plan = Lane.Route.Plan(targets, route_hero_state(), route_opts())
     State.routeScan = { plan = plan, targets = targets, our_pri = our_pri }
     State.routeScanUntil = now() + K.TEST_OVERLAY_SEC
     logline(string.format("routescan our_pri=%.2f cands=%d steps=%d gold=%.0f time=%.1f",
@@ -3561,7 +3564,7 @@ local function handle_panic()
     return now() < State.panicUntil
 end
 
--- Build the Schedule.Plan ctx for the HOME lane from a lib/lane lanes table. crash/shove point (visible
+-- Build the Lane.Schedule.Plan ctx for the HOME lane from a lib/lane lanes table. crash/shove point (visible
 -- centroid -> clash contact -> stable mid ref), wave eff-HP, wave arrival (visible -> now; fogged ->
 -- measured cadence lastWaveT + WAVE_PERIOD), travel-to-mid via InterceptETA (Keen), safety/mana gates.
 -- Returns { plan, crash_pos, stand, aim, visible, risk } or nil if no home lane / no reference point.
@@ -3642,7 +3645,7 @@ local function schedule_ctx(lanes)
     local present = visible
 
     -- arrival, CLOCK-INDEPENDENT (now + relative ETA so now cancels in slack): a VISIBLE wave is
-    -- here (~now) -> shove it. Fogged -> Schedule.NextWaveArrival predicts the next wave on the
+    -- here (~now) -> shove it. Fogged -> Lane.Schedule.NextWaveArrival predicts the next wave on the
     -- period grid: the MEASURED phase when lastWaveT is fresh, else the spawn-clock WAVE_PHASE - so
     -- anticipation stays reliable even after a missed wave (smart-laning: stop losing imminent waves).
     -- Piece 2 arrival: kpred primary (also fixes the visible-but-FAR wave, which used to read
@@ -3659,11 +3662,11 @@ local function schedule_ctx(lanes)
         -- fogged + stamped rhythm: the measured cadence beats the MIRROR kinematics (run-8,
         -- TINKER_ANCHOR_REACH_STUDY.md root cause B: mirror-kin ran 8-12s early on every fogged
         -- decide; the stamped grid err ~0 once lastWaveT existed).
-        arrival, asrc = Schedule.NextWaveArrival(now(), K.WAVE_PERIOD, K.WAVE_PHASE, State.laneWaveT.mid), "stamp"
+        arrival, asrc = Lane.Schedule.NextWaveArrival(now(), K.WAVE_PERIOD, K.WAVE_PHASE, State.laneWaveT.mid), "stamp"
     elseif pm and deep_era then
         arrival, asrc = now() + pm.eta, "kinest"   -- mirror kinematics, unstamped: DEEP-ERA only (v0.1.303 D-B: kinest timing ran 8-12s early, run-8; the lane phase trusts the spawn-clock grid)
     else
-        arrival, asrc = Schedule.NextWaveArrival(now(), K.WAVE_PERIOD, K.WAVE_PHASE, State.laneWaveT.mid), "grid"
+        arrival, asrc = Lane.Schedule.NextWaveArrival(now(), K.WAVE_PERIOD, K.WAVE_PHASE, State.laneWaveT.mid), "grid"
     end
 
     -- item 7 REWORKED (user, v0.1.154): the push sim is a TIMING input, not a veto. bal +
@@ -3682,7 +3685,7 @@ local function schedule_ctx(lanes)
         bal = pf and pf.bal
         -- v0.1.344: the bal<0 defer (arrival -> fight_end -> jungle slack) is TREK-AVOIDANCE for
         -- a FAR losing push. A REACHABLE wave has no trek and Tinker's W clears it regardless of
-        -- the creep balance, so skip the defer -> arrival stays ~now -> Schedule.Plan shoves it
+        -- the creep balance, so skip the defer -> arrival stays ~now -> Lane.Schedule.Plan shoves it
         -- (its unsafe/mana/thin/covers vetoes still gate). Only far waves defer (+ the frozen-eta
         -- remnant timing). A reachable held wave keeps asrc=held -> the .305 walk-in casts it.
         -- See TINKER_HELD_WAVE_DESIGN.md (g345 incident 2).
@@ -3833,7 +3836,7 @@ local function schedule_ctx(lanes)
     -- mana allows (engage_bail=0 historically = there is usually headroom); if not, the in-engage mana
     -- bail degrades to the prior half-clear, no worse. So: better clear, no steal/refill regression.
     -- v2 rich ctx (TINKER_LANE_GLUE_DESIGN.md item 1): the whole veto cascade + lane-first filler
-    -- live in Schedule.Plan now; the glue only feeds facts. Deliberate deltas (lib-test-pinned):
+    -- live in Lane.Schedule.Plan now; the glue only feeds facts. Deliberate deltas (lib-test-pinned):
     -- defend_crash never overrides unsafe or the mana verdict (v0.1.337), the mana gate is regen-aware (mana AT leave_by), and
     -- mana is EFFECTIVE (raw + Bottle charges) so charges count before a fountain trek.
     local hh = State.hero
@@ -3917,7 +3920,7 @@ local function schedule_ctx(lanes)
 end
 
 -- ALL-LANES Tier-1.5 (TINKER_ALLLANES_DESIGN.md): slim per-lane ctx for the SAME pure
--- Schedule.Plan. Phase-1 rules: a side wave must be VISIBLE or mirror-kinematic (no
+-- Lane.Schedule.Plan. Phase-1 rules: a side wave must be VISIBLE or mirror-kinematic (no
 -- fogged anticipation - no stamp/grid arrivals, no blind side keens); stands own-side/
 -- equilibrium (crash clamp at the lane's T1 + the depth budget); distance-ruled pre-L2
 -- (camp_alt_s vs per-lane raid-aware travel). Returns (ctx_bundle, nil) or (nil, verdict)
@@ -3972,12 +3975,12 @@ local function side_wave_ctx(lane, s)
     end
     local lsince = State.loneSince[lane]
     local lone   = (lsince and (now() - lsince) >= K.THIN_CREEPS_HOLD_S) and true or false
-    -- PHASE 2: thin fires on REAL reads only (Schedule.Plan's own thin rule is already
+    -- PHASE 2: thin fires on REAL reads only (Lane.Schedule.Plan's own thin rule is already
     -- visible-gated). A mirror estimate copies OUR paired lane's composition - a remnant
     -- there must not veto a possibly-healthy fogged wave here; estimates never veto.
     -- v0.1.345: the "thin1" token is the FIX B signature and rides the existing verdict path
     -- into ft.swtop / ft.swbot. This PRE-FILTER IS DELIBERATELY KEPT (not replaced by feeding
-    -- thin_ehp): letting a thin side wave reach Schedule.Plan would open a NEW path where a
+    -- thin_ehp): letting a thin side wave reach Lane.Schedule.Plan would open a NEW path where a
     -- side defend_crash overrides thin - a path that does not exist today.
     if visible and (lone or eff_hp < K.SHOVE_THIN_EFFHP) then
         return nil, lone and "thin1" or "thin"
@@ -3987,9 +3990,9 @@ local function side_wave_ctx(lane, s)
         arrival, asrc = now() + pm.eta, ((Lane.WaveSpeed(ew) or 325) <= K.HELD_CLOSING_MIN) and "held" or "kin"   -- v0.1.256 arc B: frozen sides name themselves too
     elseif visible then arrival, asrc = now(), "vis"
     elseif stamp_fresh then                                  -- PHASE 2: measured cadence beats the unstamped mirror (mid ladder parity, run-8)
-        arrival, asrc = Schedule.NextWaveArrival(now(), K.WAVE_PERIOD, K.WAVE_PHASE, stampT), "stamp"
+        arrival, asrc = Lane.Schedule.NextWaveArrival(now(), K.WAVE_PERIOD, K.WAVE_PHASE, stampT), "stamp"
     elseif not st1alive then arrival, asrc = now() + pm.eta, "kinest"   -- unstamped mirror kinematics: DEEP-ERA only (v0.1.303 D-B, same as mid)
-    else arrival, asrc = Schedule.NextWaveArrival(now(), K.WAVE_PERIOD, K.WAVE_PHASE, stampT), "grid" end
+    else arrival, asrc = Lane.Schedule.NextWaveArrival(now(), K.WAVE_PERIOD, K.WAVE_PHASE, stampT), "grid" end
     local bal, gone_fight_rel
     if awv and ew and not ew.estimated then                  -- REAL waves only (the mirrored-estimate bal misfire, v0.1.153)
         local pf = Lane.PushForecast(awv, ew, { cycle = math.min(30, math.floor(now() / 450)),
@@ -4136,7 +4139,7 @@ end
 
 -- ALL-LANES side-lane evaluation (extracted v0.1.229 - ONE producer for the Tier-1.5
 -- slack window AND the deep-era compete): evaluates top/bot through side_wave_ctx ->
--- contest -> Schedule.Plan -> the `window` fit, writes the swave verdicts into ft, and
+-- contest -> Lane.Schedule.Plan -> the `window` fit, writes the swave verdicts into ft, and
 -- returns (best {lane, risk, gold, casts}, bestCtx) or nil. Selection = lowest composed
 -- stand risk, gold tiebreak (the validated v0.1.227 rule).
 local function eval_side_lanes(lanes, allies, window, ft)
@@ -4170,7 +4173,7 @@ local function eval_side_lanes(lanes, allies, window, ft)
         -- point = he is on this wave -> yield; absent = take it.
         elseif cj then verdict = (cwhy == "jungle") and "contested_j" or "contested"   -- v0.1.314 cores pre-filtered (a.core); v0.1.333 the jungle branch logs its own token
         else
-            local sd = Schedule.Plan(sctx.plan)
+            local sd = Lane.Schedule.Plan(sctx.plan)
             if sd.action ~= "shove" then
                 verdict = (sd.reason == "far_wave" and "far")
                        or (sd.reason == "gone_by_arrival" and "gone")
@@ -4276,7 +4279,7 @@ local function fsm_decide()
         })
         annotate_measured(lanes)   -- v0.1.256 arc B: measured front speeds for the meeting math
         local sc = schedule_ctx(lanes)
-        local d = sc and Schedule.Plan(sc.plan) or nil
+        local d = sc and Lane.Schedule.Plan(sc.plan) or nil
         -- v0.1.339 THE CYCLE ARC (TINKER_CYCLE_MACHINE_DESIGN.md sec 4): a committed PARK
         -- window short-circuits the decide - no Tier-2 re-plan, no none-flutter (g340 F1:
         -- 8-decide plan=0 bursts at 0.4s). TERMINAL = the scheduler itself wanting anything
@@ -4354,7 +4357,7 @@ local function fsm_decide()
             end
         end
         -- The veto cascade (far_dead/deep_skip, thin_wave, no_safe_stand, the lane-first filler,
-        -- defend_crash) lives in Schedule.Plan v2 now - ordered lib rules with the hard-won
+        -- defend_crash) lives in Lane.Schedule.Plan v2 now - ordered lib rules with the hard-won
         -- invariants PINNED BY TESTS (BUG-1: a vetoed jungle never resurrects through the filler;
         -- the defer LAW: the deadline is always the CURRENT wave). schedule_ctx feeds the facts.
         -- History/rationale: TINKER_LANE_GLUE_DESIGN.md item 1 + the pre-rebuild git history.
@@ -4486,9 +4489,9 @@ local function fsm_decide()
         ft.reserve = string.format("%.1f", State.shoveTravel or 0)
         ft.horizon = string.format("%.1f", ropts.horizon_s)
     end
-    State.routePlan = Route.Plan(targets, route_hero_state(), ropts)
+    State.routePlan = Lane.Route.Plan(targets, route_hero_state(), ropts)
     -- v0.1.181 camp-drought instrument (run-16: plan=0 at FULL mana from base, 37 none-idles, the
-    -- killer stage invisible): tally WHERE camp targets die, mirroring Route.Plan's pool filter +
+    -- killer stage invisible): tally WHERE camp targets die, mirroring Lane.Route.Plan's pool filter +
     -- the afford gate. ft.rej = contested / risk-veto / leg-cap / afford / ok. Remove once the
     -- drought is root-caused off one run.
     do
@@ -4498,7 +4501,7 @@ local function fsm_decide()
             if tg.kind == "camp" then
                 if tg.contested then nC = nC + 1
                 elseif (tg.risk or 0) >= K.RISK_HARD then nR = nR + 1
-                elseif K.MAX_CAMP_TRAVEL_S and Route._leg_time(hs.pos, tg, hs) > K.MAX_CAMP_TRAVEL_S then nL = nL + 1
+                elseif K.MAX_CAMP_TRAVEL_S and Lane.Route._leg_time(hs.pos, tg, hs) > K.MAX_CAMP_TRAVEL_S then nL = nL + 1
                 else
                     -- v0.1.199: track the CHEAPEST price among camps that reach the afford stage, so
                     -- --farm-audit can machine-check the gate (ok>0 <=> pm >= need) and flag refills
@@ -4534,12 +4537,12 @@ local function fsm_decide()
         local h = State.hero
         local mmax = (NPC.GetMaxMana and NPC.GetMaxMana(h)) or 1
         local hmax = Entity.GetMaxHealth(h) or 1
-        local ccost = Schedule.WaveCycleCost({
+        local ccost = Lane.Schedule.WaveCycleCost({
             w = abil_mana(State.march, K.MARCH_MANA_FB),
             rearm = abil_mana(State.rearm, K.REARM_MANA_FB),
             keen = abil_mana(State.keen, K.KEEN_MANA_FB),
         })
-        cfill = Schedule.CycleFill({
+        cfill = Lane.Schedule.CycleFill({
             pool = effective_mana(),
             max_pool = mmax,
             cycle_cost = ccost,
@@ -5274,7 +5277,7 @@ local function fsm_move_wave(s)
                 State.marchPending = nil   -- v0.1.278: a fog-preempt on a no-show wave must not leak into the next engage's count
                 return
             end
-            local nxt = Schedule.NextWaveArrival(now(), K.WAVE_PERIOD, K.WAVE_PHASE, State.laneWaveT[s.lane or K.HOME_LANE])   -- PHASE 2: the hold's own lane cadence (side holds used MID's stamp before - wrong lane phase)
+            local nxt = Lane.Schedule.NextWaveArrival(now(), K.WAVE_PERIOD, K.WAVE_PHASE, State.laneWaveT[s.lane or K.HOME_LANE])   -- PHASE 2: the hold's own lane cadence (side holds used MID's stamp before - wrong lane phase)
             if nxt and (nxt - now()) <= K.WAVE_HOLD_NEXT then
                 s.waveEta = nxt
                 logline(string.format("wave_wait extend eta=%.1f", nxt))
@@ -5288,7 +5291,7 @@ local function fsm_move_wave(s)
         -- +30s and re-tethering would walk him back just as it shows. The expiry above owns lateness.
         if not s.steppedOut then
             local eta_live = State.laneWaveT[s.lane or K.HOME_LANE]
-                and Schedule.NextWaveArrival(now(), K.WAVE_PERIOD, K.WAVE_PHASE, State.laneWaveT[s.lane or K.HOME_LANE]) or nil   -- PHASE 2: per-lane
+                and Lane.Schedule.NextWaveArrival(now(), K.WAVE_PERIOD, K.WAVE_PHASE, State.laneWaveT[s.lane or K.HOME_LANE]) or nil   -- PHASE 2: per-lane
             -- v0.1.213 TIMED MEETING RAID: the pre-empt target is the EARLIER of the cadence eta
             -- and the sim's meeting time (fight start) - land as the waves collide.
             if s.meetEta and (raidok or not eta_live) then eta_live = eta_live and math.min(eta_live, s.meetEta) or s.meetEta end   -- v0.1.321: the min-PULL to meetEta is RAID-ONLY (raid pre-empt target :3223; fogged mirror-kin runs 8-12s early :2820, the stamp is the accurate clock), but the NO-STAMP bootstrap (eta_live nil -> meetEta) stays for ALL shoves (.318-validated; .320 gated both and left the pre-stamp step-out dead: tether eta=-, zero step_out lines that run)
@@ -5475,7 +5478,7 @@ local function fsm_move_wave(s)
            and not prot and State.laneWaveT[s.lane or K.HOME_LANE]
            and me0:Distance(s.standSpot.stand) <= K.W_PRE_STAND_R
            and effective_mana() >= abil_mana(State.march, K.MARCH_MANA_FB) + ((State.marchCasts or 0) == 0 and abil_mana(State.rearm, K.REARM_MANA_FB) or 0) then
-            local nxt = Schedule.NextWaveArrival(now(), K.WAVE_PERIOD, K.WAVE_PHASE, State.laneWaveT[s.lane or K.HOME_LANE])
+            local nxt = Lane.Schedule.NextWaveArrival(now(), K.WAVE_PERIOD, K.WAVE_PHASE, State.laneWaveT[s.lane or K.HOME_LANE])
             local lead = nxt and (nxt - now())
             -- v0.1.306: the cadence-lead window times W1 ONLY; W2 is CONSECUTIVE (the .304
             -- principle in the fogged branch) - after a fog W1 the wave is ~3.5s out, the
@@ -5764,7 +5767,7 @@ local function fsm_move_wave(s)
         -- gate and the whole tether chain still arm - run-9 stays closed) while its phase becomes
         -- the calibrated K.WAVE_PHASE. Do NOT "repair" this by subtracting the 950u engage range:
         -- that divides a HERO distance by a CREEP speed (bug class 3, ruler mismatch).
-        State.laneWaveT[ln] = Schedule.NextOnGrid(now(), K.WAVE_PERIOD, K.WAVE_PHASE) - K.WAVE_PERIOD
+        State.laneWaveT[ln] = Lane.Schedule.NextOnGrid(now(), K.WAVE_PERIOD, K.WAVE_PHASE) - K.WAVE_PERIOD
         State.laneMeet[ln] = { x = eref.x, y = eref.y, t = now() }
         -- v0.1.309 re-applied .293 (ledger; run-113 evidence: eta_err +3..+10 all game -> fog
         -- W1s fired early and the whole chain read "W2 late"): stamp the per-lane arrival
@@ -6203,7 +6206,7 @@ local function fsm_engage_wave(s)
             -- line kept naming one of them (g370 emitted live 10 / eta 10, 20 claims about a source
             -- no code reads). It now reports what is actually written.
             local ssrc = "gridtick"
-            if s.shove then State.laneWaveT[s.lane or K.HOME_LANE] = Schedule.NextOnGrid(now(), K.WAVE_PERIOD, K.WAVE_PHASE) - K.WAVE_PERIOD end   -- v0.1.366: the GRID TICK served, not waveLiveT/waveEta/now - the stamp is consumed as a PHASE and those three carry a hero-derived one. PHASE 2 per-lane slot is unchanged (the .225 shared-slot corruption stays gone).
+            if s.shove then State.laneWaveT[s.lane or K.HOME_LANE] = Lane.Schedule.NextOnGrid(now(), K.WAVE_PERIOD, K.WAVE_PHASE) - K.WAVE_PERIOD end   -- v0.1.366: the GRID TICK served, not waveLiveT/waveEta/now - the stamp is consumed as a PHASE and those three carry a hero-derived one. PHASE 2 per-lane slot is unchanged (the .225 shared-slot corruption stays gone).
             logline("engage_done reason=wave_clear casts=" .. tostring(State.marchCasts)
                     .. (s.shove and (" stampsrc=" .. ssrc) or ""))
             engage_replan()
@@ -6276,7 +6279,7 @@ local function fsm_engage_wave(s)
             return
         end
     end
-    -- D3: a shove exits at its computed casts (Schedule.ClearTime); the wave-clear exit above covers dead.
+    -- D3: a shove exits at its computed casts (Lane.Schedule.ClearTime); the wave-clear exit above covers dead.
     -- "Marches: lane wave (max W)" HUD slider caps the per-clear W count so a big / over-estimated lane
     -- wave can't burn endless March. Live-read; falls back to K.WAVE_MAX_W if the menu isn't ready.
     local maxw = (State.menu and State.menu.waveMaxW and State.menu.waveMaxW:Get()) or K.WAVE_MAX_W
@@ -6289,7 +6292,7 @@ local function fsm_engage_wave(s)
         -- healthy game can end EVERY shove on budget and never reach the wave_clear stamp below -
         -- run-9 had 17/17 budget exits, lastWaveT stayed nil all game, and the whole tether chain
         -- (asrc=stamp accurate slack -> camps fit; step_out) never armed. Same source order.
-        if s.shove then State.laneWaveT[s.lane or K.HOME_LANE] = Schedule.NextOnGrid(now(), K.WAVE_PERIOD, K.WAVE_PHASE) - K.WAVE_PERIOD end   -- v0.1.366: the GRID TICK served, not waveLiveT/waveEta/now - the stamp is consumed as a PHASE and those three carry a hero-derived one. PHASE 2 per-lane slot is unchanged (the .225 shared-slot corruption stays gone).
+        if s.shove then State.laneWaveT[s.lane or K.HOME_LANE] = Lane.Schedule.NextOnGrid(now(), K.WAVE_PERIOD, K.WAVE_PHASE) - K.WAVE_PERIOD end   -- v0.1.366: the GRID TICK served, not waveLiveT/waveEta/now - the stamp is consumed as a PHASE and those three carry a hero-derived one. PHASE 2 per-lane slot is unchanged (the .225 shared-slot corruption stays gone).
         -- v0.1.197 (run-26 t=21.9, user: "you broke the hard limit for 2 W on waves"): the robots
         -- from the 2 budget casts deliver over ~6s, so at the instant redecide the SAME wave still
         -- reads near-full (eff_hp 1461) -> re-picked -> Rearm resets March -> a 3rd W + a ~225
@@ -7788,6 +7791,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-if LOG then LOG:info('Tinker brain v0.1.394 (PHASE 0 OF THE LIB CONSOLIDATION: HYGIENE ONLY, ZERO in-game behaviour. The math.h consolidation plan is written at TINKER_LIB_CONSOLIDATION_PLAN.md and this build executes its phase 0, which kills every live hazard BEFORE any rename exists. IN THIS FILE, one change: the package.loaded cache-clear list grew from 15 to the full 22 required libs, adding timing, towers, hero_data, ability_data, threat_data, draw and vision. That list only runs at script load, so nothing changes in game; what it fixes is the mid-session HOT-RELOAD, where the seven missing modules kept a fresh wrapper over a stale cached dependency, the exact wrapper-vs-dep hole the Tier-6 audit flagged. Fixed at CURRENT names deliberately, so the consolidation renames land on a clean base. AROUND THIS FILE, the rest of phase 0: lib/unit_data.lua is DELETED from all five trees and the deployed dir, 486 lines with ZERO consumers anywhere, verified twice; its generator is kept so one command restores it. The Lina clear list gained lib.farm and lib.hero_value in both its copies, required since v0.5.78 and never cleared. The lina-hero-brain tree lib is synced to deployed, 12 stale files including a 222-line farm.lua from before the Lina adoption, and its save_select orphan is deleted, closing the standing overwrite vector its name-agnostic predeploy glob created. Six deployed libs that false-diffed against the tree on line endings alone are LF-normalized, so byte compares mean content again. The bak graveyard is swept: the deployed lib dir keeps exactly one highest-numbered rollback per lib, eight files, and the scripts dir keeps hero rollbacks .bak.388 through .bak.392, deleting 88 hero baks and 25 lib baks whose vintage ran back to v0.1.72. Sniper deliberately clears nothing, no hot-reload workflow there, decision recorded. Suite 842 of 842 after the deletion, which is itself the proof that nothing required the dead lib. Rollback Tinker.lua.bak.393... which does not exist because this deploy CREATES it; the prior hero rollback chain is .bak.388 through .bak.392 plus this build backup. Prior build was v0.1.393, BEHAVIOURAL and still efficacy-unvalidated, whose fight-defer gate was proven ALIVE at g389 by the casts-against-fresh-condition test reading 0.)') end
+if LOG then LOG:info('Tinker brain v0.1.395 (PHASE 1 OF THE LIB CONSOLIDATION, REFACTOR-ONLY, ZERO behaviour: lib/lane.lua ABSORBS lib/route.lua and lib/schedule.lua, per TINKER_LIB_CONSOLIDATION_PLAN.md and the operator math.h principle. The three files were one machine all along, lane intel feeding route planning feeding shove-cycle scheduling, and route already load-required lane. The bodies moved VERBATIM as sections of lane.lua and are mounted as SUB-TABLES, Lane.Route and Lane.Schedule, because Route.Plan and Schedule.Plan collide by name; nothing was flattened, nothing was rewritten, and the file still makes no engine call at load time, the lane.lua header law. THE RIPPLE, all in this one build: the two requires are gone from the hero, 4 Route and 32 Schedule call sites repoint to the mounted names, the package.loaded clear list drops lib.route and lib.schedule, and tools/run_tests repoints its two requires. THE TRIPWIRE LEARNED DOTTED SENTINELS: the lane entry now checks DepthRuler, PushForecast, Route.Plan and Schedule.CycleFill, so a STALE PRE-MERGE lane.lua restored into the shared directory, which would pass the old flat sentinels by design, now fails loudly at load with one line naming the missing symbol, instead of nil-crashing the hero every decide, the jonat class. AN UNPLANNED WIN: dropping the two top-level requires bought back register headroom, the main chunk falls from 195 to 193 of 200 slots, headroom 5 to 7, which un-tightens the ceiling the scan_locals rewrite exposed. DEPLOY ORDER inside the window, load-bearing: the merged lane.lua ships FIRST, and an old hero mid-window still works because route.lua and schedule.lua are deleted LAST, after the new hero lands; their pre-merge copies stay as .bak.premerge rollbacks. Suite 842 of 842 unchanged, which is the whole point: every test that exercised Route and Schedule still passes against the mounted names. End state so far: 31 deployed libs at phase 0 close become 29. ACCEPTANCE: a normal farming game, watched, since the farm cycle IS this machine; any Lua error naming lane.lua, route or schedule is an instant revert, lane.lua.bak.394 plus Tinker.lua.bak.394 plus restoring the two .bak.premerge files. Prior build was v0.1.394; the fight-defer of v0.1.393 remains efficacy-unvalidated and its casts-against-fresh-condition read stays in the per-game routine.)') end
 
 return callbacks
