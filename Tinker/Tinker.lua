@@ -13,9 +13,15 @@
 ---are later phases. UNVERIFIED in-engine: F1 = in-client calibration.
 
 if package and package.loaded then
+    -- v0.1.394 (phase 0 hygiene): the list had drifted to 15 of the 22 required libs, so a
+    -- mid-session hot-reload gave SEVEN modules (timing, towers, hero_data, ability_data,
+    -- threat_data, draw, vision) a fresh wrapper over a stale cached dependency. Known since the
+    -- Tier-6 audit; fixed at CURRENT names before any consolidation renames land on top.
     for _, m in ipairs({ "lib.map", "lib.farm", "lib.lane", "lib.route", "lib.nav", "lib.schedule",
                          "lib.escape", "lib.hero_value", "lib.geometry", "lib.map_data", "lib.channel_gate",
-                         "lib.defense", "lib.item_saves", "lib.target", "lib.position_data" }) do
+                         "lib.defense", "lib.item_saves", "lib.target", "lib.position_data",
+                         "lib.timing", "lib.towers", "lib.hero_data", "lib.ability_data",
+                         "lib.threat_data", "lib.draw", "lib.vision" }) do
         package.loaded[m] = nil
     end
 end
@@ -246,6 +252,9 @@ local K = {
     W_CAST_REACH    = 700,                          -- v0.1.305 re-applied .291 (run-99 user: casts vs a FIGHTING wave still missed the ranged, "give it more room, about 10 to 15%"): 800 -> 700. The .286-era 800 also sat INSIDE the 810 stand = a held-wave dead band; the step-in closes the gap. FIRST cast only (W2+ ungated, the consecutive principle).
     W_WAIT_RELEASE_S = 4.0,                         -- v0.1.305 re-applied .288: max casts=0 in-engage wait for the wave to close into cast reach; longer = held/receding -> release to the jungle window (suppress SHOVE_STUCK_S, re-competes next decide).
     W_PRE_STAND_R   = 600,                          -- v0.1.282 (run-90 user: "moving forward to meet the wave... makes zero sense for a 900-coverage skill - just time it and cast"): the wave approach STOPS this far from the computed stand and the preempt/prearm/timed gates accept it - the box half (900) covers the gap and the wave walks in; standing short = farther from the meet = safer. The exact stand was positioning theater for a 1800 box. v0.1.374: this now owns the APPROACH-STOP (:5077, :5546), the FOG pre-cast (:5018) and the TIMED arrival trigger (:5278, target lead ZERO by design). The W1 lead pair (fire gate + prearm) moved to W_PRE_LEAD_R. Raising THIS is refuted: :5546 is the walk-stop, so raising it parks the hero 1100 short of the stand, 1910 from the ranged creep, outside MARCH_REACH 1150.
+    FIGHT_CONTACT_R     = 300,                       -- v0.1.393: creep fronts within this of each other = the wave is IN A FIGHT and its arrival is unknowable; the W1 lead defers. Corpus predicate: recall 19-23 of 28-32 bad leads, FP 6-10 of 105-112 landed (two independent joins), every FP converting to an at-arrival cast, never a lost wave.
+    FIGHT_HOLD_S        = 3.0,                       -- v0.1.393: freshness TTL on the fight stamp (1.5x AUTO_WAVESCAN_S 2.0, guards a stalled scan). Expired stamp = no defer, fail-open.
+    PREARM_CD_FLOOR     = 4.0,                       -- v0.1.392: minimum March cd_remaining for the marchCasts==0 prearm path. Below it the CD expires before the lead window anyway and a Rearm (~225 mana + a ~2s channel) would be wasted. Precheck over g377-g386: at 4.0 the addressable class is 4 episodes (gaps 6/6/12/26s, one wave fully castless) and the waste class is ZERO.
     W_PRE_LEAD_R    = 1100,                         -- v0.1.374: the W1 LEAD pair's own hero-to-stand bound, decoupled from W_PRE_STAND_R. Read at EXACTLY THREE sites and they must move together: the fire gate (:5237), its diagnostic mirror (:5215), and prearm_w2 (:4722). WHY THE PREARM IS IN THE PAIR: :5520-5543 returns BEFORE the approach walk at :5545, and the only movers inside it are a threat-gated step-back and a delivery walk behind ready(State.march), so leaving prearm at 600 would fire W1 at dstand ~1090 with NOTHING walking the hero the remaining 490u. Three independent measurements of that frozen closure disagreed (287-455 u/s, 304-313 u/s, and ~0), i.e. the W2 delay would be somewhere between zero and unbounded; moving all three preserves today's invariant (prearm true the instant W1 fires) and is the SMALLER behavioural delta. WHY 600 WAS WRONG: it capped the effective lead at 600/close = 1.85s at creep speed 325, which made the v0.1.371 ruler fix inert on ordinary waves (g374 EFFLEAD median 1.90 at close>=280 vs a 2.02 pre-fix baseline) while it genuinely bought the slow-wave band. WHY 1100 AND NOT A TUNED NUMBER: 1090 = W_LEAD_CAP 1900 - ANTICIP_RANGED_REACH 810 is the exact saturation on a COLLINEAR UNCLAMPED stand; 1100, 1200 and 1500 are behaviourally identical across the whole corpus, so this is the tightest bound at saturation, retained as an off-axis tail guard because :5237 is the only hero-to-stand bound in the fire gate (four cap-legal corpus rows sit at dstand 1227-1538). The operative bound is really min(W_PRE_LEAD_R, W_LEAD_CAP - gap, 810 + W_LEAD_S*close) and 1100 is rarely the binding term: that is the design, not a defect. COVERAGE IS NOT AT RISK: the meet is timed 810 forward of the CAST POINT (:5250 numerator) and the cast clamps to 280 from the hero (:4597), and 810 < MARCH_HALFWIDTH 900, so meet coverage does not depend on hero-to-stand distance. CALIBRATE DOWN if casts whiff.
     WAVE_MAX_W      = 2,                            -- DEFAULT for the "Marches: lane wave (max W)" menu slider: HARD CAP on W (March) casts per LANE-wave clear (the engage budget). shoveCasts from ClearTime(eff_hp) is capped to it so a big/over-estimated wave can't burn endless W under the tower. Applies to the wave being ENGAGED (visible or an arrived incoming one); waiting casts nothing. Camps have their own budget. Live-tunable on the HUD.
     LANE_MEET_TTL      = 90,                      -- v0.1.303 LANE-CLOCK: an observed arrival ground (State.laneMeet) anchors fogged dispatches for this long (3 wave periods); older -> the lane midpoint fallback (s.meeting).
@@ -2626,7 +2635,10 @@ local function run_lane_scan(arm_overlay)
         -- e=6 hp=2408 push=enemy sat 944u off it, both with alH=0, and Tinker took camps at
         -- t=412.7 and t=496.2. This asks the question the scheduler actually needs straight from
         -- geometry, and feeds the EXISTING sticky-crash hook instead of inventing a second defend
-        -- pathway - every consumer (:3671, :3873, :4036) and CRASH_STICKY_S already work.
+        -- pathway - every consumer and CRASH_STICKY_S already work. Consumers, by SHAPE not line
+        -- number (they shift): the two defend_crash conditions, and crash_fresh_any, which is NOT a
+        -- defend - it terminates the v0.1.339 cycle park and it iterates ALL lanes, so a mid stamp
+        -- kills a park. That consumer is unmeasured; see the queue.
         -- HOME LANE ONLY, DELIBERATELY. Calibrated over six logs the same rule fires mid 11 / top 7
         -- / bot 9, and a side-lane defend is a TRIP AWAY FROM MID, which is the v0.1.312 direction
         -- that costs games (g376 alone would add 7 bot trips). On MID a defend is very nearly the
@@ -2649,26 +2661,68 @@ local function run_lane_scan(arm_overlay)
         -- both watched episodes (the parked e=4 hp=1933 and the e=6 hp=2408 push=enemy) while
         -- dropping 11 stamps to 8; on g383 it drops 19 stamps to 4, all four push=enemy at hp
         -- 1351-1466, which brings the fire rate back inside the intended band.
+        -- v0.1.390 RULER FIX (review finding, CONFIRMED, bug class 3). The threat is measured
+        -- TOWER-to-wave-front, but the no-ally gate used s.ally_heroes, which lib/lane.lua counts
+        -- within hero_radius 1200 of clash.CONTACT - the midpoint of the two fronts, a different
+        -- place. When our own wave sits far back the contact slides thousands of units behind the
+        -- threatened tower: measured 2163u and 1616u apart on real g383 rows, so an ally standing
+        -- ON the tower was invisible to the gate and the stamp fired anyway. That is the operator's
+        -- own stated revert trigger. Second half: lib/lane.lua _read_heroes does NOT filter the
+        -- local hero, so ally_heroes counted TINKER, and the stamp stopped refreshing the moment he
+        -- arrived, dropping the defend pin CRASH_STICKY_S later, mid-defence.
+        -- Both are fixed by asking the question where it actually matters: is another ALLY hero
+        -- near THIS TOWER. Hero-local on purpose - s.ally_heroes is shared-lib and feeds other
+        -- consumers, so it is left alone.
+        -- ally_near_tower is evaluated per candidate tower below, inside the range branch.
         if ln == K.HOME_LANE and K.TOWER_THREAT_R > 0 and ew and not ew.estimated and ew.front
-           and (ew.count or 0) >= K.TOWER_THREAT_MINC and (s.ally_heroes or 0) == 0
+           and (ew.count or 0) >= K.TOWER_THREAT_MINC
            and (ew.hp or 0) >= K.SHOVE_THIN_EFFHP
            and not (s.clash and s.clash.pushing == "ally") then
             for _, t in ipairs(MapData.TOWERS or {}) do
                 if t.team == State.team and t.pos and t.name and t.name:find("_" .. ln, 1, true) then
                     local dx, dy = t.pos[1] - ew.front.x, t.pos[2] - ew.front.y
                     if dx * dx + dy * dy <= K.TOWER_THREAT_R * K.TOWER_THREAT_R then
-                        local live = false
-                        for _, te in ipairs(Map.TowersInRadius(Vector(t.pos[1], t.pos[2], 0), K.TOWER_ALIVE_R) or {}) do
-                            if Entity.GetTeamNum(te) == State.team and Entity.IsAlive(te) then live = true; break end
+                        -- is another ALLY hero (never Tinker himself) near THE TOWER?
+                        local allyNear = false
+                        for _, hh in ipairs(Heroes.GetAll() or {}) do
+                            if hh ~= State.hero and Entity.IsAlive(hh)
+                               and Entity.GetTeamNum(hh) == State.team
+                               and (not NPC.IsIllusion or not NPC.IsIllusion(hh)) then
+                                local hp2 = (not Entity.IsDormant(hh)) and Entity.GetAbsOrigin(hh)
+                                            or (Hero.GetLastMaphackPos and Hero.GetLastMaphackPos(hh))
+                                if hp2 then
+                                    local ax, ay = hp2.x - t.pos[1], hp2.y - t.pos[2]
+                                    if ax * ax + ay * ay <= K.TOWER_THREAT_R * K.TOWER_THREAT_R then
+                                        allyNear = true; break
+                                    end
+                                end
+                            end
+                        end
+                        local live = not allyNear
+                        if not allyNear then
+                            live = false
+                            for _, te in ipairs(Map.TowersInRadius(Vector(t.pos[1], t.pos[2], 0), K.TOWER_ALIVE_R) or {}) do
+                                if Entity.GetTeamNum(te) == State.team and Entity.IsAlive(te) then live = true; break end
+                            end
                         end
                         if live then
                             State.crashSeen = State.crashSeen or {}
                             State.crashSeen[ln] = now()
-                            if now() - (State.twrThreatLogT or 0) > 2.0 then
-                                State.twrThreatLogT = now()
-                                logline(string.format("tower_threat ln=%s e=%d hp=%d d=%.0f twr=%s modelcrash=%s",
+                            -- v0.1.391: THROTTLE REMOVED. It was 2.0s against a ~2.0s scan, so it
+                            -- hid about 37% of stamps, and this count is load-bearing: it is the
+                            -- denominator for every conversion rate on this arc and the correction
+                            -- that makes the analyzer's miss counts an upper bound. Real volume is
+                            -- ~19 lines/game at the worst observed rate, which is nothing.
+                            do
+                                -- oldgate = what the retired contact-centred, self-counting gate
+                                -- would have said. differ=1 means the two rulers disagreed on this
+                                -- row; that is the measurement this fix exists to make.
+                                local oldg = (s.ally_heroes or 0) == 0
+                                logline(string.format(
+                                    "tower_threat ln=%s e=%d hp=%d d=%.0f twr=%s modelcrash=%s alH=%d oldgate=%s differ=%d",
                                     ln, ew.count or 0, math.floor(ew.hp or 0),
-                                    math.sqrt(dx * dx + dy * dy), t.name, crash))
+                                    math.sqrt(dx * dx + dy * dy), t.name, crash,
+                                    s.ally_heroes or -1, tostring(oldg), oldg and 0 or 1))
                             end
                             break
                         end
@@ -2680,11 +2734,28 @@ local function run_lane_scan(arm_overlay)
         -- current fight, + = OUR lane pushes; peta = predicted fight-end time). Instrumentation on
         -- trial: --lane-report judges bal against the OBSERVED front movement in the same log.
         local bal, peta = "-", "-"
+        -- v0.1.393 THE FIGHT STAMP (4b-A, USER-WATCHED twice). Clear-then-restamp = freshest-read
+        -- semantics: any scan without contact (fronts apart, wave gone, fogged) clears the lane.
+        State.fightSeen = State.fightSeen or {}
+        State.fightSeen[ln] = nil
         if ew and aw then
             local pf = Lane.PushForecast(aw, ew, { cycle = math.min(30, math.floor(now() / 450)),
                                                    game_time = now(), rounds = 1 })
             bal  = string.format("%d", pf.bal or 0)
             peta = string.format("%.1f", now() + (pf.first_t or 0))
+            -- The stamp: a REAL read (est=n), both fronts present, in contact, AND the sim says the
+            -- fight outlasts the lead horizon. pf.first_t is SIM output admitted ONLY as a trim
+            -- that NARROWS the defer set (contact must independently hold; absent/false sim yields
+            -- today's behaviour bit-identically) - never a veto of an engage, never a clock, so the
+            -- v0.1.241 estimates-never-veto law is untouched. COUPLING, deliberate: the threshold
+            -- reuses K.W_LEAD_S, so a future W_LEAD_S recalibration silently moves the defer set -
+            -- revisit this line if W_LEAD_S ever changes.
+            if not ew.estimated and ew.front and aw.front
+               and (ew.front.x - aw.front.x) ^ 2 + (ew.front.y - aw.front.y) ^ 2
+                   <= K.FIGHT_CONTACT_R * K.FIGHT_CONTACT_R
+               and (pf.first_t or 0) > K.W_LEAD_S then
+                State.fightSeen[ln] = now()
+            end
         end
         -- v0.1.363 INSTRUMENT (log-only): NAME THE CRASH TOWER AND ITS DISTANCE FROM THE CONTACT.
         -- crash=allyTwr is the predicate behind defend_crash, the most absolute verdict in the
@@ -3064,6 +3135,13 @@ local function ally_farm_priorities()
     if State.posT and now() < State.posT - 30 then
         State.posFinal, State.posFinalSrc, State.posLogged = nil, nil, nil
         State.posEngine, State.posLaneTally, State.posProbed = nil, nil, nil
+        -- v0.1.389: this reset exists BECAUSE there is no OnGameStart/OnGameEnd hook anywhere in the
+        -- script, and v0.1.385/.386 then added match-scoped latches without extending it. crashSeen
+        -- is the one that matters: it gates defend_crash, the verdict that outranks every economic
+        -- veto, and the tower-threat stamp is what makes it reliably non-empty at match end.
+        State.crashSeen, State.twrThreatLogT = nil, nil
+        State.rearmNoFundT, State.rearmNoFundGap, State.rearmNoFundLogT = nil, nil, nil
+        State.fightSeen = nil   -- v0.1.393 (the scan's clear-then-restamp self-heals this within 2s anyway; cleared here per the match-scoped-latch rule)
         logline("pos_reset new_match")
     end
     State.posT = now()
@@ -5089,7 +5167,15 @@ local function fsm_move_wave(s)
             State.marchPending = nil   -- v0.1.314 (bug hunt A4): a cast_pos-true-but-unfired pending was cleared only by the ENGAGE resolver - in MOVE it stalled every subsequent W block until arrival. Same expire clear as ENGAGE now.
         end
         local me1 = origin(State.hero)
-        if (State.marchCasts or 0) == 1 and not State.marchPending and not ready(State.march)
+        -- v0.1.392: ALSO admit marchCasts==0 when March is on MEANINGFUL cooldown. A commit that
+        -- STARTS CD-down (marchCasts resets to 0 at dispatch; the spend was a camp pair or the
+        -- previous wave's W2) had NO rearm producer at all: this gate and the pocket twin both
+        -- required ==1 and the tether prearm is keen-only. Corpus: ~1.6 in-band march_cd episodes
+        -- per game, 4 of them the fresh>4s class this opens (one wave ended CASTLESS), ~4.2 s/game.
+        -- The CD floor keeps the ==0 path off waves whose March returns before the lead window
+        -- (precheck: zero such waste at 4.0). Mana gate + safe_rearm carry over unchanged.
+        if (State.marchCasts or 0) <= 1 and not State.marchPending and not ready(State.march)
+           and ((State.marchCasts or 0) == 1 or cd_remaining(State.march) > K.PREARM_CD_FLOOR)
            and (me1:Distance(s.standSpot.stand) <= K.W_PRE_LEAD_R   -- v0.1.374: MOVES WITH THE FIRE GATE (:5237). If this stayed at W_PRE_STAND_R 600 while the gate fired at 1100, W1 would go out and the rearm would not arm, with nothing in :5520-5543 walking the hero the remaining 490u.
                 or channel_threat_near({ x = s.standSpot.stand.x, y = s.standSpot.stand.y }))   -- v0.1.307 the rearm dance: a disabler forced the step-back beyond the stand ring - rearm wherever the gate clears
            and effective_mana() >= abil_mana(State.rearm, K.REARM_MANA_FB) + abil_mana(State.march, K.MARCH_MANA_FB)
@@ -5309,7 +5395,8 @@ local function fsm_move_wave(s)
             local w = protected_wait_spot({ x = s.standSpot.stand.x, y = s.standSpot.stand.y })
             local hv = Vector(w.x, w.y, me0.z)
             State.waitInfo = { why = string.format("wave %ds @tower", math.max(0, math.floor((s.waveEta or now()) - now()))), t = now() }
-            if (State.marchCasts or 0) == 1 and not State.marchPending and not ready(State.march)
+            if (State.marchCasts or 0) <= 1 and not State.marchPending and not ready(State.march)
+               and ((State.marchCasts or 0) == 1 or cd_remaining(State.march) > K.PREARM_CD_FLOOR)   -- v0.1.392: same widen as the MOVE gate (textually-identical twins, one change)
                and me0:Distance(hv) <= K.WAVE_HOLD_EPS
                and effective_mana() >= abil_mana(State.rearm, K.REARM_MANA_FB) + abil_mana(State.march, K.MARCH_MANA_FB)
                and safe_rearm() then
@@ -5585,6 +5672,7 @@ local function fsm_move_wave(s)
         elseif ds < 0 then why = "no_stand"
         elseif ds > K.W_PRE_LEAD_R then why = "stand_far"   -- v0.1.374: MIRRORS the fire gate's own bound (:5237). A diagnostic on a different ruler than the gate it explains is bug class 3, and this row is the only instrument that names why the lead refused.
         elseif effective_mana() < abil_mana(State.march, K.MARCH_MANA_FB) + abil_mana(State.rearm, K.REARM_MANA_FB) then why = "mana"
+        elseif State.fightSeen and State.fightSeen[s.lane] and now() - State.fightSeen[s.lane] <= K.FIGHT_HOLD_S then why = "fight"   -- v0.1.393: the defer, named - THE acceptance signal
         elseif cl > 0 and ((dref - K.ANTICIP_RANGED_REACH) / cl) > K.W_LEAD_S then why = "lead_bar"
         end
         -- v0.1.371 SHIP 0 (log-only): also emit the row the tick the closing EMA ARMS. s.wgN
@@ -5606,7 +5694,13 @@ local function fsm_move_wave(s)
        and dref > K.WAVE_ENGAGE_RANGE and dref <= K.W_LEAD_CAP
        and (s.wgClose or 0) >= K.W_CLOSING_MIN and (s.wgN or 0) >= 2   -- v0.1.309 (run-113 2:30, W1 "100% off" on a non-moving wave): ONE post-reset EMA sample read 305 on a held wave (anchor-jump noise); the lead needs a WARM read
        and me:Distance(s.standSpot.stand) <= K.W_PRE_LEAD_R   -- v0.1.374: W_PRE_LEAD_R 1100, NOT W_PRE_STAND_R 600 - at 600 this conjunct algebraically capped the effective lead at 600/close (1.85s at creep speed 325) and made the v0.1.371 ruler fix inert on ordinary waves. Moves in lockstep with :4722 and :5215. See :199.
-       and effective_mana() >= abil_mana(State.march, K.MARCH_MANA_FB) + abil_mana(State.rearm, K.REARM_MANA_FB) then
+       and effective_mana() >= abil_mana(State.march, K.MARCH_MANA_FB) + abil_mana(State.rearm, K.REARM_MANA_FB)
+       -- v0.1.393 (4b-A): NO lead pre-cast while the wave is locked in a fresh-stamped creep fight
+       -- (g387 t=307: W1 on tarr=3.8, wave arrived +15.8s late, robots expired by the tower, the
+       -- 2-cast budget closed leaving 862hp/130g to the tower). Defer-the-cast, never the engage:
+       -- the at-arrival flow below is untouched and owns every deferred wave. nil lane or nil
+       -- stamp = no defer, fail-open.
+       and not (State.fightSeen and State.fightSeen[s.lane] and now() - State.fightSeen[s.lane] <= K.FIGHT_HOLD_S) then
         -- v0.1.371 THE RULER FIX (D1). tools/w_timing_sweep.lua:14 measured the lead to a STAND
         -- 810 out (:30 t_arrive = (D0-STAND)/v) while this gate measured to the HERO, dref->0, so
         -- every fire has been about 2.5s short of the band K.W_LEAD_S is NAMED for: measured
@@ -6793,7 +6887,12 @@ local function bottle_tick()
     -- the channel guard above, and the risk gate below all still apply, and nothing else changes.
     -- It does not force a rearm; it only makes the mana effective_mana() already promised real.
     local ch = (Item.GetCurrentCharges and Item.GetCurrentCharges(bottle)) or 0
-    local wantRearm = State.rearmNoFundT and (now() - State.rearmNoFundT) < 1.0
+    -- v0.1.389: the freshness test is TWO-SIDED. It was `now() - stamp < 1.0`, upper bound only,
+    -- and now() restarts near zero on a second match in one script load, so a stamp of ~900 from the
+    -- previous game evaluates as -900 < 1.0 = TRUE for the WHOLE new match instead of for one second.
+    -- Identical inside a single match (age is never negative there), so this cannot move a live game.
+    local rnfAge = State.rearmNoFundT and (now() - State.rearmNoFundT) or nil
+    local wantRearm = rnfAge ~= nil and rnfAge >= 0 and rnfAge < 1.0
                       and (State.rearmNoFundGap or math.huge) <= ch * K.BOTTLE_MANA_PER_CHARGE
     if not (lowm or lowh or wantRearm) then return end
     if enemy_risk_at(origin(State.hero)) >= K.SHOVE_SAFE_RISK then return end -- bottle breaks on enemy damage
@@ -7689,6 +7788,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-if LOG then LOG:info('Tinker brain v0.1.388 (LOG-ONLY, ZERO behaviour: a SHARED-LIB TRIPWIRE, from a field crash report. A user hit attempt to call a nil value, field DepthRuler, at Tinker dot lua line 599 inside stand_depth, thrown from OnUpdateEx, i.e. EVERY DECIDE. IT IS NOT A CODE BUG AND NOTHING IN THIS TREE CAUSED IT: Lane.DepthRuler has existed since v0.1.327, this session never touched it, and it is present in the repo, in the deployed copy and in the public mirror. IT IS A PACKAGING FAULT. C:/Umbrella/scripts/lib is ONE directory shared by every hero package a user installs, and the public dota-hero-brains package ships lib/lane.lua at 410 lines against this tree 930. Installing that package overwrites the shared lib with an older copy and strips functions this hero calls. Measured across the two public repos: 18 of the 26 libs they BOTH ship DIFFER, and the Tinker mirror calls 25 functions those older copies do not define, spread over five libs, so repairing one symbol only uncovers the next. The reverse direction is safe: the Lina and Sniper sources have no call sites that the newer libs lack, so the correct repair is to replace the WHOLE lib directory with the one shipped alongside Tinker.lua, never a single file. THE TRIPWIRE: at load, check one or two of the NEWEST exports per shared lib, which is what a stale copy loses first, and if any is missing emit ONE line naming every missing symbol and the cause. It is a SENTINEL, not a contract, it is LOG-ONLY, and it deliberately does NOT disable the brain: the point is to put an actionable line at the top of the log instead of an unreadable per-tick traceback that names Tinker.lua and blames the wrong file. VERIFIED BY EXECUTION, not by reading: replicated against three trees offline. It stays CLEAN on this repo and on the deployed copy, and TRIPS with 9 entries on the stale public tree, including exactly the Lane.DepthRuler that was reported. Note the offline harness also reports escape and geometry as not loading, which is an artifact of running outside the engine because geometry dot lua line 103 and target dot lua line 17 index the engine global Enum at load; in game those are live tables the hero already holds, so the shipped check cannot false-alarm on them. Suite 842 of 842, libs untouched, hero-only deploy, rollback Tinker.lua.bak.387. Prior build was v0.1.387.)') end
+if LOG then LOG:info('Tinker brain v0.1.394 (PHASE 0 OF THE LIB CONSOLIDATION: HYGIENE ONLY, ZERO in-game behaviour. The math.h consolidation plan is written at TINKER_LIB_CONSOLIDATION_PLAN.md and this build executes its phase 0, which kills every live hazard BEFORE any rename exists. IN THIS FILE, one change: the package.loaded cache-clear list grew from 15 to the full 22 required libs, adding timing, towers, hero_data, ability_data, threat_data, draw and vision. That list only runs at script load, so nothing changes in game; what it fixes is the mid-session HOT-RELOAD, where the seven missing modules kept a fresh wrapper over a stale cached dependency, the exact wrapper-vs-dep hole the Tier-6 audit flagged. Fixed at CURRENT names deliberately, so the consolidation renames land on a clean base. AROUND THIS FILE, the rest of phase 0: lib/unit_data.lua is DELETED from all five trees and the deployed dir, 486 lines with ZERO consumers anywhere, verified twice; its generator is kept so one command restores it. The Lina clear list gained lib.farm and lib.hero_value in both its copies, required since v0.5.78 and never cleared. The lina-hero-brain tree lib is synced to deployed, 12 stale files including a 222-line farm.lua from before the Lina adoption, and its save_select orphan is deleted, closing the standing overwrite vector its name-agnostic predeploy glob created. Six deployed libs that false-diffed against the tree on line endings alone are LF-normalized, so byte compares mean content again. The bak graveyard is swept: the deployed lib dir keeps exactly one highest-numbered rollback per lib, eight files, and the scripts dir keeps hero rollbacks .bak.388 through .bak.392, deleting 88 hero baks and 25 lib baks whose vintage ran back to v0.1.72. Sniper deliberately clears nothing, no hot-reload workflow there, decision recorded. Suite 842 of 842 after the deletion, which is itself the proof that nothing required the dead lib. Rollback Tinker.lua.bak.393... which does not exist because this deploy CREATES it; the prior hero rollback chain is .bak.388 through .bak.392 plus this build backup. Prior build was v0.1.393, BEHAVIOURAL and still efficacy-unvalidated, whose fight-defer gate was proven ALIVE at g389 by the casts-against-fresh-condition test reading 0.)') end
 
 return callbacks

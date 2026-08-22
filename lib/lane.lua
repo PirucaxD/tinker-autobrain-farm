@@ -414,7 +414,8 @@ function Lane.PredictClash(enemy_wave, ally_wave, towers, opts)
         -- `along` cannot exceed drift_coeff * creep_speed * horizon (~975 at shipped constants),
         -- yet the logged contact-to-tower distance ran a median 3212 in g380 and 96.8-97.2% of
         -- every crash stamp in g379/g380 named a tower the drift cannot physically reach. Those
-        -- stamps set State.crashSeen (Tinker.lua:2536) and CRASH_STICKY_S carries them 10s into a
+        -- stamps set State.crashSeen (in run_lane_scan; match by SHAPE, the line number shifts) and
+        -- CRASH_STICKY_S carries them 10s into a
         -- decide where defend_crash skips the round-trip window check. A wave crashes a tower when
         -- it comes within that tower's ATTACK RANGE of the drift segment - bounded sideways AND
         -- ahead, both by the tower's own range, which the strength loop above already reads.

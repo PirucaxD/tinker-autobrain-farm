@@ -136,6 +136,7 @@ for i = 1, #arg do
     elseif a == "--fog-report" then mode = "fog_report"; mode_count = mode_count + 1
     elseif a == "--stuck-report" then mode = "stuck_report"; mode_count = mode_count + 1
     elseif a == "--crash-report" then mode = "crash_report"; mode_count = mode_count + 1
+    elseif a == "--mana-report" then mode = "mana_report"; mode_count = mode_count + 1
     elseif a:match("^%-%-fog%-recalc=") then opt_fog_recalc = a:match("^%-%-fog%-recalc=(.+)$")
     elseif a == "--with-takeover" then opt_with_takeover = true
     elseif a == "--help" or a == "-h" then usage(); os.exit(0)
@@ -3387,7 +3388,7 @@ elseif mode == "state_report" then
             w.only_pollers and "[POLLER-ONLY] " or "", table.concat(str, ", ")))
     end
     os.exit(0)
-elseif mode ~= "fog_report" and mode ~= "stuck_report" and mode ~= "crash_report" then   -- v0.1.353/v0.1.362/v0.1.383: fog_report, stuck_report and crash_report are handled in their own blocks at the end of the file, so the timeline fallback must not also fire for them
+elseif mode ~= "fog_report" and mode ~= "stuck_report" and mode ~= "crash_report" and mode ~= "mana_report" then   -- v0.1.353/v0.1.362/v0.1.383: fog_report, stuck_report and crash_report are handled in their own blocks at the end of the file, so the timeline fallback must not also fire for them
     -- timeline mode. v6.15.2 low: sort kv keys deterministically per-line
     -- so diff-tooling output is stable between runs.
     for i = 1, #events do
@@ -3618,6 +3619,76 @@ if mode == "stuck_report" then
     print("    bucket measures the same trips from the silence side (g366: 128s = 26.5%).")
     os.exit(0)
 
+-- v0.1.391 PARSER NOTE (verified against g385): `wait_end why=` values CONTAIN SPACES. The hero
+-- normaliser emits `why=wave closing`, `why=cycle park`, `why=tether wave`, `why=W wait`. A generic
+-- (%S+)=(%S+) kv parse SILENTLY TRUNCATES those to wave / cycle / tether / W, which merges distinct
+-- causes into one bucket and invents a `wave` bucket that is really `wave closing`. Any mode reading
+-- this field must match `why=(.-) dur=`, never a bare (%S+). g385: 23 `wave closing`, 12 `tether`,
+-- 11 `suppressed`, 9 `wave`, 5 `W wait`, 2 `window`, 2 `tether wave`.
+elseif mode == "mana_report" then
+    -- v0.1.391: the ACCEPTANCE READ for the v0.1.386 bottle conversion rung. The hero has logged
+    -- every field since v0.1.384 and this tool read NONE of it (0 hits for rearm_nofund and bottle),
+    -- so the arc was judged by hand greps - which is exactly how the g382 counts came out
+    -- banner-contaminated (17/16 reported, 15/14 real). Events come from the parsed stream, which
+    -- cannot see the banner, so these counts are contamination-proof by construction.
+    -- why=rearm is the NEW rung and the acceptance signal. why=lowm / why=lowh are PRE-EXISTING and
+    -- their RATE MUST NOT MOVE; if it does, the change leaked.
+    print("--- mana report --- rearm refusals and Bottle conversion (v0.1.386 acceptance)")
+    print("    baselines, per minute: rearm_nofund 6.2 pre-fix (g383), 1.67 (g384), 2.82 (g385)")
+    print("")
+    for _, p in ipairs(paths) do
+        local evs = load_log(p)
+        local dur, nf, fsm, mism, above = 0, 0, {}, 0, 0
+        local drinks, rearm_t, drink_t = {}, {}, {}
+        for _, e in ipairs(evs) do
+            local t = tonumber(e.kv and e.kv.t)
+            if t and t > dur then dur = t end
+            if e.event == "rearm_nofund" then
+                nf = nf + 1
+                local f = e.kv.fsm or "?"
+                fsm[f] = (fsm[f] or 0) + 1
+                local raw, eff, need = tonumber(e.kv.raw), tonumber(e.kv.eff), tonumber(e.kv.need)
+                if raw and eff and need then
+                    if eff >= need and raw < need then mism = mism + 1 end
+                    if raw >= 200 then above = above + 1 end
+                end
+            elseif e.event == "bottle" then
+                -- a why-less bottle event is the FOUNTAIN chain-drink branch, which logs
+                -- "bottle drink fountain" with no why= and is doctrine, not a rung. Name it, so it
+                -- cannot be misread as an unexplained bucket.
+                local w = (e.kv and e.kv.why) or "fountain(no-why)"
+                drinks[w] = (drinks[w] or 0) + 1
+                if w == "rearm" then drink_t[#drink_t + 1] = tonumber(e.kv._t or e.kv.t) or 0 end
+            elseif e.event == "rearm" then rearm_t[#rearm_t + 1] = 0 end
+        end
+        local mins = (dur > 0) and (dur / 60) or 1
+        print(string.format("== %-22s  %5.0fs / %.1f min", p:gsub("^.*/", ""), dur, mins))
+        print(string.format("   rearm_nofund: %-4d = %.2f/min", nf, nf / mins))
+        if nf > 0 then
+            local parts = {}
+            for k, v in pairs(fsm) do parts[#parts + 1] = string.format("%s %d", k, v) end
+            table.sort(parts)
+            print("     by fsm: " .. table.concat(parts, "  "))
+            print(string.format("     eff>=need but raw<need (THE mismatch): %d (%.0f%%)   raw>=BOTTLE_MANA 200 (no drink could fire pre-fix): %d",
+                mism, 100 * mism / nf, above))
+        end
+        local dk = {}
+        for k, v in pairs(drinks) do dk[#dk + 1] = string.format("%s=%d", k, v) end
+        table.sort(dk)
+        print("   bottle drinks: " .. (#dk > 0 and table.concat(dk, "  ") or "(none)"))
+        local nr = drinks.rearm or 0
+        if nr > 0 then
+            print(string.format("   VERDICT: the new rung FIRED %d time(s). Cross-check the revert trigger by hand:", nr))
+            print("            a why=rearm drink must be followed by a rearm, else it burned a charge.")
+        else
+            print("   VERDICT: why=rearm did NOT fire. Either no qualifying refusal occurred, or the rung is dead.")
+            print("            Check rearm_nofund above: a high count with zero why=rearm means DEAD, not quiet.")
+        end
+        print("")
+    end
+    print("REMINDER: why=lowm / why=lowh are PRE-EXISTING rungs. Their rate must NOT change.")
+    os.exit(0)
+
 elseif mode == "crash_report" then
     -- v0.1.383 ACCEPTANCE INSTRUMENT for the crash-model proximity fix.
     -- THE BAR IS ARITHMETIC, NOT A CALIBRATED THRESHOLD. PredictClash clamps the drift at a
@@ -3726,8 +3797,13 @@ elseif mode == "crash_report" then
 
         print(string.format("== %-26s %-9s  %5.0fs   scans allyTwr=%d enemyTwr=%d none=%d",
             p:match("[^/\\]+$"), build_of(p), dur, n_ally, n_enemy, n_none))
-        if n_st == 0 then
-            print("   NO crash stamps at all. That is RED, not a pass: the defend path cannot fire.")
+        -- v0.1.389 (review, CONFIRMED, bug class 3): this tested n_st, which counts allyTwr AND
+        -- enemyTwr, while the rule it enforces is about DEFEND verdicts. Only allyTwr reaches the
+        -- defend path (the hero stamps State.crashSeen on allyTwr alone), so a game with zero
+        -- defends but plenty of enemyTwr stamps graded PASS. Test the right counter.
+        if #ctds_ally == 0 then
+            print(string.format("   NO allyTwr stamps at all (%d enemyTwr). RED, not a pass: only", n_enemy))
+            print("   allyTwr reaches the defend path, so the defend path could not have fired.")
         else
             print(string.format("   UNREACHABLE (ctd > %.0f): %d/%d = %.1f%%   [allyTwr %d/%d = %.1f%%]   <<< THE BAR",
                 CEILING, over, n_st, share, over_ally, #ctds_ally,
@@ -3767,6 +3843,12 @@ elseif mode == "crash_report" then
     local MD2 = require("lib.map_data")
     for _, p in ipairs(paths) do
         local evs = load_log(p)
+        -- v0.1.389 (review, CONFIRMED): since v0.1.385 the brain stamps State.crashSeen through a
+        -- SECOND channel, the tower-threat rule in run_lane_scan, which leaves the wavescan row's
+        -- crash field at "-". Every such row was scored a MISS. Count that channel and say so.
+        -- Bands also gained 1100 to match the shipped K.TOWER_THREAT_R; 700/900 predate it.
+        local tt = 0
+        for _, e in ipairs(evs) do if e.event == "tower_threat" then tt = tt + 1 end end
         -- v0.1.387 (adversarial review, CONFIRMED): `team` used to default to 2 with NO not-found
         -- path, so a log missing self_acquired silently measured every enemy wave against the
         -- ENEMY team's towers and invented run-76-shaped emergencies with nothing on screen saying
@@ -3796,8 +3878,8 @@ elseif mode == "crash_report" then
             end
             return bd, bn
         end
-        local sit, hit, miss, miss_alone = { [700] = 0, [900] = 0 }, { [700] = 0, [900] = 0 },
-                                           { [700] = 0, [900] = 0 }, { [700] = 0, [900] = 0 }
+        local sit, hit, miss, miss_alone = { [700]=0,[900]=0,[1100]=0 }, { [700]=0,[900]=0,[1100]=0 },
+                                           { [700]=0,[900]=0,[1100]=0 }, { [700]=0,[900]=0,[1100]=0 }
         local worst = nil
         for _, e in ipairs(evs) do
             if e.event == "wavescan" and e.kv.ln and e.kv.est == "n" and e.kv.ef and e.kv.ef ~= "-" then
@@ -3806,7 +3888,7 @@ elseif mode == "crash_report" then
                 if fx and cnt >= 3 then
                     local d, nm = nearest(tonumber(fx), tonumber(fy))
                     local alh = tonumber(e.kv.alH) or 0
-                    for _, band in ipairs({ 700, 900 }) do
+                    for _, band in ipairs({ 700, 900, 1100 }) do
                         if d <= band then
                             sit[band] = sit[band] + 1
                             if e.kv.crash == "allyTwr" then hit[band] = hit[band] + 1
@@ -3835,11 +3917,12 @@ elseif mode == "crash_report" then
             end
         end
         io.write(string.format("  %-26s team=%d  ", p:match("[^/\\]+$"), team))
-        for _, band in ipairs({ 700, 900 }) do
+        for _, band in ipairs({ 700, 900, 1100 }) do
             io.write(string.format("[<=%d: %d near, %d flagged, %d missed, %d UNDEFENDED]  ",
                 band, sit[band], hit[band], miss[band], miss_alone[band]))
         end
-        print("")
+        print(string.format("      tower_threat stamps this log: %d  (a SECOND crashSeen channel that the", tt))
+        print("      crash= field never shows, so the miss counts above are an UPPER BOUND)")
         if worst then
             print(string.format("      worst UNDEFENDED: ln=%s e=%d hp=%d a=%d  %.0fu from %s  crash=%s",
                 worst.ln, worst.e, worst.hp, worst.a, worst.d, worst.twr, worst.crash))
