@@ -2404,8 +2404,15 @@ describe("lib/escape - CommitWiden (commit risk v2, group B)", function()
         -- fails here. Kills ZERO code mutants by design: it is a config lint,
         -- not an implementation test. Precedent for reading Tinker.lua as text
         -- is the fog probe contract block below.
-        local f = assert(io.open("Tinker/Tinker.lua", "r"),
-            "cannot open Tinker/Tinker.lua (run the suite from the repo root)")
+        local f = io.open("Tinker/Tinker.lua", "r")
+        if not f then
+            -- 2026-08-22: the sniper repo deliberately gitignores Tinker/ ("not part of the
+            -- Sniper repo"), so a clean checkout there has no hero source. This block is a
+            -- TEXT CONTRACT against that source; without it there is nothing to lint - skip
+            -- loudly rather than abort the suite (which must stay green from that tree).
+            print("  SKIP  hero-source contract block: Tinker/Tinker.lua not present in this tree")
+            return
+        end
         local src = f:read("*a"); f:close()
         local function num(name)
             local v = src:match(name .. "%s*=%s*(%-?[%d%.]+)")
@@ -2458,6 +2465,12 @@ describe("lib/escape - CommitWiden (commit risk v2, group B)", function()
             local f = assert(io.open(p, "r"), "cannot open " .. p .. " (run the suite from the repo root)")
             local s = f:read("*a"); f:close(); return s
         end
+        local tf = io.open("Tinker/Tinker.lua", "r")
+        if not tf then
+            print("  SKIP  fog-probe contract block: Tinker/Tinker.lua not present in this tree")
+            return
+        end
+        tf:close()
         local tinker = slurp("Tinker/Tinker.lua")
         local parser = slurp("tools/parse_debuglog.lua")
 
@@ -2550,8 +2563,15 @@ describe("lib/escape - CommitWiden (commit risk v2, group B)", function()
         -- and same TV-6 nil-guard rule as B13/B14: it asserts the pattern was
         -- FOUND, so a rename fails loudly here instead of silently extracting
         -- nothing. It pins semantics, not layout - anything may move around it.
-        local f = assert(io.open("Tinker/Tinker.lua", "r"),
-            "cannot open Tinker/Tinker.lua (run the suite from the repo root)")
+        local f = io.open("Tinker/Tinker.lua", "r")
+        if not f then
+            -- 2026-08-22: the sniper repo deliberately gitignores Tinker/ ("not part of the
+            -- Sniper repo"), so a clean checkout there has no hero source. This block is a
+            -- TEXT CONTRACT against that source; without it there is nothing to lint - skip
+            -- loudly rather than abort the suite (which must stay green from that tree).
+            print("  SKIP  hero-source contract block: Tinker/Tinker.lua not present in this tree")
+            return
+        end
         local src = f:read("*a"); f:close()
         assert_true(src:find("risk_radius%s*=%s*K%.RISK_RADIUS%s*%+%s*%(%s*widen%s+or%s+0%s*%)") ~= nil,
             "enemy_risk_at no longer adds the widen to risk_radius: THE feature is gone, and the "
@@ -3726,6 +3746,12 @@ describe("fog probe <-> analyzer format contract (v0.1.353)", function()
         local f = assert(io.open(p, "r"), "cannot open " .. p .. " (run the suite from the repo root)")
         local s = f:read("*a"); f:close(); return s
     end
+    local tf0 = io.open("Tinker/Tinker.lua", "r")
+    if not tf0 then
+        print("  SKIP  fog-probe<->analyzer contract: Tinker/Tinker.lua not present in this tree")
+        return
+    end
+    tf0:close()
     local tinker = slurp("Tinker/Tinker.lua")
     local parser = slurp("tools/parse_debuglog.lua")
 
