@@ -273,7 +273,7 @@ local Farm = require("lib.farm")
 local Map  = require("lib.map")
 local Lane = require("lib.lane")
 local Route = require("lib.lane").Route      -- v0.1.395: absorbed into lane (phase 1)
-local Nav = require("lib.nav")
+local Nav = require("lib.map").Nav            -- v0.1.396: absorbed into map (phase 2)
 local Schedule = require("lib.lane").Schedule -- v0.1.395: absorbed into lane (phase 1)
 
 describe("lib/farm , pure geometry (v0.5.82)", function()
@@ -5428,7 +5428,7 @@ describe("lib/lane -- TrackFrontSpeed: measured front displacement (arc B)", fun
 end)
 
 describe("lib/towers -- registry: alive flag + measured hp-slope death eta", function()
-    local TW = require("lib.towers")
+    local TW = require("lib.map").Towers
     local KEY = "tower1_mid@3"
     it("melt extrapolation: eta ~= hp/rate", function()
         local st = TW.Track({}, { { key = KEY, hp = 1800, alive = true } }, 100)
@@ -5930,7 +5930,7 @@ end)
 -- v0.1.379: the observed-lane helpers. These gate a match-level position label, and a wrong label
 -- flips IsCore, so the two guards (minimum samples, dominant share) are the load-bearing part.
 describe("lib/position_data -- observed lane", function()
-    local Pos = require("lib.position_data")
+    local Pos = require("lib.map").Positions
 
     it("needs sustained samples: below the minimum count returns nil", function()
         assert_true(Pos.ObservedLane({ top = 11, mid = 0, bot = 0, n = 11 }) == nil,

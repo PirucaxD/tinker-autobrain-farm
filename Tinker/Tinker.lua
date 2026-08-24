@@ -17,10 +17,10 @@ if package and package.loaded then
     -- mid-session hot-reload gave SEVEN modules (timing, towers, hero_data, ability_data,
     -- threat_data, draw, vision) a fresh wrapper over a stale cached dependency. Known since the
     -- Tier-6 audit; fixed at CURRENT names before any consolidation renames land on top.
-    for _, m in ipairs({ "lib.map", "lib.farm", "lib.lane", "lib.nav",
+    for _, m in ipairs({ "lib.map", "lib.farm", "lib.lane",
                          "lib.escape", "lib.hero_value", "lib.geometry", "lib.map_data", "lib.channel_gate",
-                         "lib.defense", "lib.item_saves", "lib.target", "lib.position_data",
-                         "lib.timing", "lib.towers", "lib.hero_data", "lib.ability_data",
+                         "lib.defense", "lib.item_saves", "lib.target",
+                         "lib.timing", "lib.hero_data", "lib.ability_data",
                          "lib.threat_data", "lib.draw", "lib.vision" }) do
         package.loaded[m] = nil
     end
@@ -31,12 +31,10 @@ local Timing    = require("lib.timing")   -- v0.1.334: the arrival-watchdog rule
 local HeroValue = require("lib.hero_value")
 local MapData   = require("lib.map_data")   -- static positions fallback (camps/towers/outposts/fountains)
 local Lane      = require("lib.lane")        -- lane intel (waves + clash + intercept), Task C foundation
-local Nav       = require("lib.nav")          -- lane nav chokepoint (Piece 0): SafeDest clamp + transport ladder
 -- (lib.shove + lib.farm_decide were CONDENSED into lib.farm 2026-07-01 - cohesive domain libs, like
 -- C's math.h: Farm.CrashCast / Farm.MarchCovers / Farm.OutsideTowerRange.)
 local Escape    = require("lib.escape")        -- fog-aware proximity risk (COR-1)
 local Geometry  = require("lib.geometry")      -- pure geometry: teleport reach-disc landing (Keen/BoT)
-local Towers    = require("lib.towers")        -- v0.1.246: per-tower alive flag + measured hp-slope death eta
 local HeroData    = require("lib.hero_data")    -- ARC E1: enemy kits (which laner carries a channel-breaking disable)
 local AbilityData = require("lib.ability_data") -- ARC E1: disable cast ranges (static, per level)
 local ThreatData  = require("lib.threat_data")  -- ARC E1: ability -> threat modifier -> role classification
@@ -46,7 +44,6 @@ local ItemSaves = require("lib.item_saves")   -- ARC E2: hero-agnostic defensive
 local Target    = require("lib.target")       -- ARC E2: enemy-hero test for the harvest filter (also loaded transitively by item_saves/escape)
 local Draw      = require("lib.draw")         -- v0.1.324 headroom lift wave 1: screen-space drawing/debug rendering (Font/W2S/Text/WorldText/Ring/Line/Seg/OBox)
 local Vision    = require("lib.vision")       -- v0.1.354: shared last-seen tracker (OnSetDormant); feeds lib/escape FogSnapshot
-local Pos       = require("lib.position_data") -- v0.1.378, LIVE since v0.1.382: per-hero PLAYABLE Dota positions (D2PT 7k, period 8). Data only, read by the shadow classifier below and by NOTHING that moves the hero.
 
 -- ── SHARED-LIB TRIPWIRE (v0.1.388) ───────────────────────────────────────────
 -- C:/Umbrella/scripts/lib is ONE directory shared by every hero package a user installs, so a
@@ -74,8 +71,9 @@ do
         ["lib/farm.lua"]          = { Farm,     "Farm",     { "CrashCast", "ObservedFarmers" } },
         ["lib/escape.lua"]        = { Escape,   "Escape",   { "CommitWiden", "NearestEnemyEdge" } },
         ["lib/geometry.lua"]      = { Geometry, "Geometry", { "DiscReachPoint" } },
-        ["lib/nav.lua"]           = { Nav,      "Nav",      { "SafeDest" } },
-        ["lib/position_data.lua"] = { Pos,      "Pos",      { "Shadow" } },
+        -- v0.1.396: map absorbed nav+towers+position_data (phase 2). Dotted sentinels so a
+        -- restored PRE-merge map.lua fails loudly at load, naming the missing symbol.
+        ["lib/map.lua"]           = { Map,      "Map",      { "TowersInRadius", "Nav.SafeDest", "Towers.Track", "Positions.Shadow" } },
     }
     local bad = {}
     for file, spec in pairs(need) do
@@ -985,7 +983,7 @@ local function enemy_risk_at(pt, widen)
     if not pt then return 0 end
     local snap = State.fog or enemy_snapshot()   -- per-decide snapshot (set in fsm_decide); avoids rebuilding it ~40x
     -- v0.1.247 CRASH FIX (found by a tester of the public mirror, field-verified): several
-    -- callers pass a PLAIN {x,y} table (safe_stand_for's raid_safe stand from Nav.SafeDest/
+    -- callers pass a PLAIN {x,y} table (safe_stand_for's raid_safe stand from Map.Nav.SafeDest/
     -- snap_walkable, lane_unsafe's pos, lane_go dests) while FogProximityRisk calls
     -- pt:Distance2D - engine-Vector only. With any hero in the snapshot (visible OR fresh-
     -- fogged) that throws escape.lua:858 EVERY decide -> fsm_decide aborts before picking ->
@@ -1294,7 +1292,7 @@ end
 
 -- REBUILD: clear of EVERY alive enemy tower's attack range + a real margin = no tower damage AND no
 -- barely-outside anxiety. note 1 / option A (v0.1.159): the old risk<SHOVE_SAFE_RISK gate stopped the
--- Nav.SafeDest clamp at ~800 from tower center (attack range 700 + the taper edge), which put stands
+-- Map.Nav.SafeDest clamp at ~800 from tower center (attack range 700 + the taper edge), which put stands
 -- 100u outside the tower 3+ times a game. Now a stand needs ATTACK_RANGE + TOWER_SAFE_MARGIN (900);
 -- March reach (1200) still covers 300 past the tower, so the tower-border W-farm is intact. STRICTER
 -- than the live abort (lane_unsafe trips ~800) is the safe direction of the v0.1.148 consistency rule:
@@ -1415,7 +1413,7 @@ end
 -- Proactive escape blink: flee to the safest walkable spot within blink clamp BEFORE the burst
 -- (damage_cooldown 3 makes it useless once hit). Primary escape; the caller falls back to walk/keen.
 -- Tree-blink (glue rebuild item 5): prefer hiding in the densest standing-tree cluster away from
--- the nearest threat (Nav.TreeHideSpot on Map.TreesInRadius) - breaks vision AND pathing; the open
+-- the nearest threat (Map.Nav.TreeHideSpot on Map.TreesInRadius) - breaks vision AND pathing; the open
 -- safest-spot pick stays the fallback when no cluster qualifies.
 local function try_escape_blink()
     if not can_blink("escape") then return false end
@@ -1438,7 +1436,7 @@ local function try_escape_blink()
         local tp = Entity.GetAbsOrigin(t)
         if tp then trees[#trees + 1] = { x = tp.x, y = tp.y } end
     end
-    local hide = Nav.TreeHideSpot(trees, { x = me.x, y = me.y }, threat, { blink_max = K.BLINK_CLAMP })
+    local hide = Map.Nav.TreeHideSpot(trees, { x = me.x, y = me.y }, threat, { blink_max = K.BLINK_CLAMP })
     if hide then
         hide = Map.SnapWalkable(hide, { x = me.x, y = me.y })       -- land beside the cluster, not IN a tree
         if do_blink(Vector(hide.x, hide.y, me.z)) then
@@ -1576,7 +1574,7 @@ local SAVE_CFG = {
     end,
     compute_safe_dest = function(caster, dist)
         -- Tinker's own escape geometry (NOT Lina's): full push distance away
-        -- from the caster, Nav.SafeDest stepping BACK toward the hero (retreat
+        -- from the caster, Map.Nav.SafeDest stepping BACK toward the hero (retreat
         -- = -dir: shorter pushes stay in cast range and still away from the
         -- caster; stepping outward would exceed range and get engine-clamped
         -- onto the unsafe point). SafeDest's max-back degraded case is still
@@ -1598,7 +1596,7 @@ local SAVE_CFG = {
         -- max_steps caps the walk-back BEFORE the hero: steps at/past floor(d/100)
         -- land on/behind me toward the caster (Task 2 review); the capped degraded
         -- point then fails the tower_safe re-check below and the save skips cleanly.
-        local pt = Nav.SafeDest({ x = me.x + dirx * d, y = me.y + diry * d },
+        local pt = Map.Nav.SafeDest({ x = me.x + dirx * d, y = me.y + diry * d },
                                 { x = -dirx, y = -diry }, tower_safe,
                                 { max_steps = math.floor(d / 100) - 1 })
         if not (pt and tower_safe(pt)) then return nil, nil end
@@ -1915,7 +1913,7 @@ local function safe_stand_for(meeting, forward, deep_ok, lane)
     local dl = math.sqrt(dx * dx + dy * dy); if dl < 1 then return nil, false, false end
     -- Glue rebuild item 2: ONE stand = lib composition. Farm.CrashCast places the back-toward-
     -- fountain offset (forward = anticipation: closer so March catches the wave early + lands on the
-    -- trailing ranged; contested = the safe 900 back-off), Nav.SafeDest clamps it tower-safe (never
+    -- trailing ranged; contested = the safe 900 back-off), Map.Nav.SafeDest clamps it tower-safe (never
     -- sits in tower range), snap_walkable keeps it off ridges. Replaces the hand-rolled push-back
     -- loop; schedule_ctx's raw-offset duplicates route here too.
     local back = forward and K.ANTICIP_RANGED_REACH or K.WAVE_STANDBACK
@@ -1927,7 +1925,7 @@ local function safe_stand_for(meeting, forward, deep_ok, lane)
     -- walk-farmable -> covers=false -> Plan no_safe_stand/gone_by_arrival -> jungle (the exclusion
     -- lands in the SCHEDULE, per the point-system doctrine). deep_ok (raid-capable) exempts: that
     -- transit is a creep-keen, not a walk. tower_safe always holds.
-    local stand = Nav.SafeDest(g.stand, { x = dx / dl, y = dy / dl }, tower_safe)
+    local stand = Map.Nav.SafeDest(g.stand, { x = dx / dl, y = dy / dl }, tower_safe)
     stand = Map.SnapWalkable(stand, meeting)
     local reach  = (K.MARCH_CAST_RANGE or 300) + (K.MARCH_HALFWIDTH or 900)
     -- v0.1.201: the deep era leashes lane positions to our mid tower (T1DOWN_LEASH).
@@ -2560,12 +2558,12 @@ local function run_lane_scan(arm_overlay)
                 end
                 if ent then
                     samples[#samples + 1] = { key = key, hp = Entity.GetHealth(ent), alive = true }
-                elseif Towers.Alive(State.towerTrack, key) then
+                elseif Map.Towers.Alive(State.towerTrack, key) then
                     samples[#samples + 1] = { key = key, alive = false }
                 end
             end
         end
-        State.towerTrack = Towers.Track(State.towerTrack, samples, now())
+        State.towerTrack = Map.Towers.Track(State.towerTrack, samples, now())
     end
     -- Piece 1 (lane instruments, TINKER_LANE_NAV_DESIGN.md roadmap): CLEAN k=v rows + the truth
     -- fields (fronts/meeting/hp/prediction) so the offline `--lane-report` can measure each wave
@@ -2773,7 +2771,7 @@ local function run_lane_scan(arm_overlay)
         -- towers_by_lane sits built and unused at :483-486). ctp/ctd turn that reconstruction into
         -- a direct reading. NOTHING GATES ON THESE FIELDS.
         -- THE TOWER RECORD CARRIES NO NAME. lib/lane.lua _read_towers builds it from the LIVE engine
-        -- (Towers.GetAll), not from MapData.TOWERS, as { pos = {x,y}, team, range, alive } - so
+        -- (the ENGINE global Towers.GetAll), not from MapData.TOWERS, as { pos = {x,y}, team, range, alive } - so
         -- ct.key and ct.name are both nil and a key field would print "?" on every line and look
         -- like a working instrument. The POSITION is the identity: MapData.TOWERS names it offline.
         -- ctd IS THE MEASUREMENT. It is contact-to-tower, the SAME pair lane.lua:398 projects, so
@@ -2986,13 +2984,13 @@ end
 -- PINNING ONLY and must never reach the contest veto directly - that conflation is the v0.1.312
 -- regression (74 false contested verdicts).
 -- NOTE ON PLACEMENT (v0.1.379): the observed-lane helpers live in lib/position_data.lua as
--- Pos.ObservedLane and Pos.LaneSlots, and the per-tick tally is INLINED into ally_farm_priorities
+-- Map.Positions.ObservedLane and Map.Positions.LaneSlots, and the per-tick tally is INLINED into ally_farm_priorities
 -- below. That is not stylistic. The main chunk sits AT Lua's 200-local ceiling and adding three more
 -- top-level `local function`s threw "too many local variables (limit is 200)" at luac. Pure position
 -- logic belongs in the lib anyway; only the tally needs hero-local State/now/Lane, and it is four
 -- lines at the one site that already has both the ally name and its position in scope.
 -- HEADROOM LIFT WAVE 2 (refactor-only, zero behaviour change): the residual-set solver that used to
--- sit right here as a top-level `pos_shadow` moved to lib/position_data.lua as Pos.Shadow, for the
+-- sit right here as a top-level `pos_shadow` moved to lib/position_data.lua as Map.Positions.Shadow, for the
 -- same ceiling reason and to join the two helpers above.
 
 -- one-shot engine probe: is starting_position actually populated? pcall'd because every call here is
@@ -3038,7 +3036,7 @@ end
 -- WHAT ACTUALLY ENFORCES the operator's set-and-never-change rule: THE nil-GUARD BELOW, nothing else.
 -- CORRECTION, and read this before relaxing anything here. An earlier version of this comment argued
 -- that stage 2 intersects the observed lane INTO the stage-1 residual, so R2 is a subset of R1 and a
--- determined bit can never reverse. THAT PROOF IS FALSE. `local resid = Pos.Shadow(names)` runs FRESH
+-- determined bit can never reverse. THAT PROOF IS FALSE. `local resid = Map.Positions.Shadow(names)` runs FRESH
 -- at BOTH stages and R1 is never stored anywhere, so the real relation is
 -- R2 = Shadow(names@stage2) intersect LaneSlots, and R2 subset R1 holds only if
 -- Shadow(names@stage2) subset Shadow(names@stage1). Nothing in the code enforces that.
@@ -3166,19 +3164,19 @@ local function ally_farm_priorities()
                 end
                 if n >= #names then pos_commit("engine", bits) end
             end
-            local resid = Pos.Shadow(names)
+            local resid = Map.Positions.Shadow(names)
             if stage == 2 then
                 -- intersect the observed lane's slot set into each residual. INTERSECT, never
                 -- replace: an odd lineup then narrows to EMPTY and reads UNDETERMINED rather than
                 -- confidently wrong, which is the failure direction this whole arc exists to avoid.
                 for _, nm in ipairs(names) do
                     local h = (State.posLaneTally or {})[nm]
-                    local ln, share = Pos.ObservedLane(h)
+                    local ln, share = Map.Positions.ObservedLane(h)
                     logline(string.format("pos_lane name=%s top=%d mid=%d bot=%d n=%d obs=%s share=%.2f",
                         nm, (h and h.top) or 0, (h and h.mid) or 0, (h and h.bot) or 0,
                         (h and h.n) or 0, tostring(ln), share or 0))
                     if ln and resid[nm] then
-                        local slots = Pos.LaneSlots(ln, State.team)
+                        local slots = Map.Positions.LaneSlots(ln, State.team)
                         for v in pairs(resid[nm]) do if not slots[v] then resid[nm][v] = nil end end
                     end
                 end
@@ -3186,7 +3184,7 @@ local function ally_farm_priorities()
             local commitBits = {}
             for _, a in ipairs(out) do
                 if a.name then
-                    local raw, rs = Pos.Of(a.name), {}
+                    local raw, rs = Map.Positions.Of(a.name), {}
                     for v in pairs(resid[a.name] or {}) do rs[#rs + 1] = v end
                     table.sort(rs)
                     -- one-sided test; empty residual is UNDETERMINED, never "not core".
@@ -3798,7 +3796,7 @@ local function schedule_ctx(lanes)
     end
     local crash_twr_key = tower_key_near(crashTwrPos)
     if crash_twr_key and covers
-       and Towers.DeathEta(State.towerTrack, crash_twr_key, now()) < travel_to_mid + K.TOWER_DYING_MARGIN_S then
+       and Map.Towers.DeathEta(State.towerTrack, crash_twr_key, now()) < travel_to_mid + K.TOWER_DYING_MARGIN_S then
         covers, cwhy = false, "tower_dying"
     end
 
@@ -4029,7 +4027,7 @@ local function side_wave_ctx(lane, s)
     end
     local crash_twr_key = tower_key_near(crashTwrPos)
     if crash_twr_key
-       and Towers.DeathEta(State.towerTrack, crash_twr_key, now()) < travel + K.TOWER_DYING_MARGIN_S then
+       and Map.Towers.DeathEta(State.towerTrack, crash_twr_key, now()) < travel + K.TOWER_DYING_MARGIN_S then
         return nil, "tower_dying"
     end
     -- stand: the SAME safe composition, leash keyed to this lane; per-lane depth points
@@ -4730,7 +4728,7 @@ end
 -- count centroid, for distance/engage-range), re-aim s.standSpot.aim at the moving wave so the March
 -- lands on it, AND re-derive s.standSpot.stand from the live wave through the SAFE stand composition
 -- (v0.1.155). History: T4a froze the stand because the old recompute was an UNCLAMPED raw offset that
--- slid under towers on a deep wave; the composed stand (CrashCast + Nav.SafeDest(tower_safe) + snap)
+-- slid under towers on a deep wave; the composed stand (CrashCast + Map.Nav.SafeDest(tower_safe) + snap)
 -- cannot, and the freeze itself proved to be a stuck-bug (a fogged decide's estimate froze a stand
 -- outside both engage triggers -> the hero stood at it forever while the real wave fought 1240u away).
 -- Returns { cx, cy, n } of the live cluster, or nil when the wave is gone (no enemy creeps near).
@@ -4762,7 +4760,7 @@ local function update_wave_spot(s)
             -- froze 900-back of a possibly-lying estimate (fogged mirror ~400u off), leaving the hero
             -- outside BOTH engage triggers forever (dref ~1240 > 950/1150 = the completely-stuck lane).
             -- The freeze existed because the OLD recompute was an unclamped raw offset that slid under
-            -- towers; safe_stand_for is CrashCast + Nav.SafeDest(tower_safe) + snap now, so live
+            -- towers; safe_stand_for is CrashCast + Map.Nav.SafeDest(tower_safe) + snap now, so live
             -- tracking is safe. Not coverable -> fall through to the OFF span-center aim.
             -- glue review F19 (v0.1.157): forward is CONTESTED-AWARE, same as the decide-time stand
             -- (forward 850 only on a clear lane; a live-appearing enemy backs the stand to 900).
@@ -4817,13 +4815,13 @@ end
 
 -- Shared no-progress watchdog (Note 1): a Keen can land on terrain we cannot path to the stand
 -- from (e.g. a tower's high ground), so move_to spins forever and never times out. True when
--- distance-to-target has not improved by PROGRESS_EPS within NO_PROGRESS_S (Nav.Stuck, the lib
+-- distance-to-target has not improved by PROGRESS_EPS within NO_PROGRESS_S (Map.Nav.Stuck, the lib
 -- home of the watchdog family). Caller decides the recovery (camp marks cleared; a shove just
 -- re-decides). State.moveTrack resets per committed spot. Only for STATIC stands; the live-wave
 -- stand moves with the cluster (use MOVE_TIMEOUT there).
 local function no_progress(d)
     local stuck
-    State.moveTrack, stuck = Nav.Stuck(State.moveTrack, d, now(),
+    State.moveTrack, stuck = Map.Nav.Stuck(State.moveTrack, d, now(),
         { eps = K.PROGRESS_EPS, window = K.NO_PROGRESS_S })
     return stuck
 end
@@ -4856,8 +4854,8 @@ local function keen_cancel_check()
 end
 
 -- Piece 0 (TINKER_LANE_NAV_DESIGN.md): the LANE movement chokepoint. Every lane move routes here:
--- ONE structural safety policy (Nav.SafeDest clamp toward our fountain + report) + ONE transport
--- ladder (Nav.Ladder: keen -> rearm-reset -> blink -> walk, executed via the existing gated
+-- ONE structural safety policy (Map.Nav.SafeDest clamp toward our fountain + report) + ONE transport
+-- ladder (Map.Nav.Ladder: keen -> rearm-reset -> blink -> walk, executed via the existing gated
 -- primitives, falling through on primitive failure). Jungle keeps its own paths (separate layer);
 -- dynamic danger (enemies) stays with the FSM live aborts. The clamp log is the Piece-1 instrument:
 -- every "lane_go clamp" line is evidence of an upstream bad-stand bug.
@@ -4917,7 +4915,7 @@ local function lane_go(dest, raid)
         State.spot = nil; State.fsm = "DECIDE"; State.moveSince = nil
         return nil
     end
-    local sdest, clamped = Nav.SafeDest({ x = dest.x, y = dest.y }, retreat, tower_safe)   -- v0.1.193: movement is tower-clamped ONLY; the stairs line is a decide-time exclusion (covers/gone), never a movement clamp
+    local sdest, clamped = Map.Nav.SafeDest({ x = dest.x, y = dest.y }, retreat, tower_safe)   -- v0.1.193: movement is tower-clamped ONLY; the stairs line is a decide-time exclusion (covers/gone), never a movement clamp
     if clamped then
         logline(string.format("lane_go clamp (%.0f,%.0f) -> (%.0f,%.0f)", dest.x, dest.y, sdest.x, sdest.y))
     end
@@ -4931,7 +4929,7 @@ local function lane_go(dest, raid)
     -- the leg. A mana-short keen counts as coming (the .232 case: funding arrives
     -- mid-leg via bottle/regen). Return-path blinks (fsm_return) are untouched.
     -- v0.1.351: the gate above also blocked every leg the ladder never OFFERS a keen for.
-    -- Nav.Ladder emits keen/rearm only when d > keen_min_gain (K.KEEN_TRAVEL_MIN 1600),
+    -- Map.Nav.Ladder emits keen/rearm only when d > keen_min_gain (K.KEEN_TRAVEL_MIN 1600),
     -- and keenedSpot latches ONLY inside that rung, so on a sub-1600 lane leg keenedSpot
     -- can never become true and blink_ok() was permanently false - the dagger was unusable
     -- on short lane legs while the camp path (fsm_move) blinks identical distances. The
@@ -4996,7 +4994,7 @@ local function lane_go(dest, raid)
             or (wd <= K.KEEN_TRAVEL_MIN and "short") or "no_keen")
         move_to(sv, "lane_walk"); return "walk"
     end
-    local rungs = Nav.Ladder(me:Distance(sv), {
+    local rungs = Map.Nav.Ladder(me:Distance(sv), {
         keened = State.keenedSpot, keen_ready = ready(State.keen), keen_min_gain = K.KEEN_TRAVEL_MIN,
     })
     for _, r in ipairs(rungs) do
@@ -5075,7 +5073,7 @@ local function fsm_move_wave(s)
     -- terminus DIED - the wave pushes past it and nothing arrives at this stand. The run-57
     -- law: geometry changes REDECIDE, never hold (this kills the 25s stale stand even when
     -- the melt prediction missed the dispatch).
-    if s.crashTowerKey and Towers.Alive(State.towerTrack, s.crashTowerKey) == false then
+    if s.crashTowerKey and Map.Towers.Alive(State.towerTrack, s.crashTowerKey) == false then
         logline("tower_died -> redecide lane=" .. tostring(s.lane or K.HOME_LANE))
         State.spot = nil; State.fsm = "DECIDE"; State.moveSince = nil
         return
@@ -6959,13 +6957,13 @@ local function tick()
         -- v0.1.355: FEED THE MOVE WATCHDOGS, then hold orders. This is the v0.1.259 guard,
         -- relocated from fsm_move (:5210) where it could NEVER run: this early return sits
         -- ABOVE the FSM dispatch, so fsm_move is not called at all during a channel. And
-        -- Nav.Stuck is WALL-CLOCK (t - best_t >= window, lib/nav.lua:58), so it does not care
+        -- Map.Nav.Stuck is WALL-CLOCK (t - best_t >= window, lib/nav.lua:58), so it does not care
         -- that nobody called it meanwhile - the first post-channel call charges the entire
         -- channel to "no progress". At Rearm L1 that is REARM_CHANNEL 2.69 + CHANNEL_PAD 0.20
         -- + rearmPending 0.20 = 3.09s, just over NO_PROGRESS_S 3.0, so the watchdog fired
         -- deterministically and mark_spot_cleared retired a LIVE camp (and its pair partner)
         -- until respawn. g354: 5 of 5 no-progress firings in the game were this, none genuine.
-        -- Clearing the track re-baselines the next Nav.Stuck call, so a channel costs the
+        -- Clearing the track re-baselines the next Map.Nav.Stuck call, so a channel costs the
         -- watchdog nothing and it only ever accumulates over time it actually observed - which
         -- is the invariant it always meant to enforce. Covers BOTH no_progress callers (the
         -- camp path :5211 and the shove path :4696 share State.moveTrack).
@@ -6977,7 +6975,7 @@ local function tick()
     -- blocked -> TELEPORT (keen home; rearm-reset-keen if on cd) to unstick + re-decide. Only when FAR
     -- from the target, so legitimately STANDING at the stand/fountain (waiting for a wave, etc.) never
     -- triggers it. A last-resort backstop over the per-state no_progress / MOVE_TIMEOUT watchdogs.
-    -- Glue rebuild item 4: Nav.Stuck (signal upgrade from position-frozen to no-distance-improvement:
+    -- Glue rebuild item 4: Map.Nav.Stuck (signal upgrade from position-frozen to no-distance-improvement:
     -- orbiting without approaching now counts as stuck, which is correct).
     -- v0.1.194 F1 (run-24): a DELIBERATE wait (tether hold / protected wait / hold-still) is
     -- frozen-far-from-target BY DESIGN - the watchdog read it as stuck and keened him home mid-
@@ -6992,7 +6990,7 @@ local function tick()
         local dist = tgt and p:Distance(Vector(tgt.x, tgt.y, p.z))
         if dist and dist > K.STUCK_FAR_DIST then
             local stuck
-            State.stuckTrack, stuck = Nav.Stuck(State.stuckTrack, dist, now(),
+            State.stuckTrack, stuck = Map.Nav.Stuck(State.stuckTrack, dist, now(),
                 { eps = K.STUCK_FROZEN_DIST, window = K.STUCK_TELEPORT_S })
             if stuck then
                 -- v0.1.362 INSTRUMENT (log-only, no new state: fsm, tgt and State.lastMove all
@@ -7791,6 +7789,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-if LOG then LOG:info('Tinker brain v0.1.395 (PHASE 1 OF THE LIB CONSOLIDATION, REFACTOR-ONLY, ZERO behaviour: lib/lane.lua ABSORBS lib/route.lua and lib/schedule.lua, per TINKER_LIB_CONSOLIDATION_PLAN.md and the operator math.h principle. The three files were one machine all along, lane intel feeding route planning feeding shove-cycle scheduling, and route already load-required lane. The bodies moved VERBATIM as sections of lane.lua and are mounted as SUB-TABLES, Lane.Route and Lane.Schedule, because Route.Plan and Schedule.Plan collide by name; nothing was flattened, nothing was rewritten, and the file still makes no engine call at load time, the lane.lua header law. THE RIPPLE, all in this one build: the two requires are gone from the hero, 4 Route and 32 Schedule call sites repoint to the mounted names, the package.loaded clear list drops lib.route and lib.schedule, and tools/run_tests repoints its two requires. THE TRIPWIRE LEARNED DOTTED SENTINELS: the lane entry now checks DepthRuler, PushForecast, Route.Plan and Schedule.CycleFill, so a STALE PRE-MERGE lane.lua restored into the shared directory, which would pass the old flat sentinels by design, now fails loudly at load with one line naming the missing symbol, instead of nil-crashing the hero every decide, the jonat class. AN UNPLANNED WIN: dropping the two top-level requires bought back register headroom, the main chunk falls from 195 to 193 of 200 slots, headroom 5 to 7, which un-tightens the ceiling the scan_locals rewrite exposed. DEPLOY ORDER inside the window, load-bearing: the merged lane.lua ships FIRST, and an old hero mid-window still works because route.lua and schedule.lua are deleted LAST, after the new hero lands; their pre-merge copies stay as .bak.premerge rollbacks. Suite 842 of 842 unchanged, which is the whole point: every test that exercised Route and Schedule still passes against the mounted names. End state so far: 31 deployed libs at phase 0 close become 29. ACCEPTANCE: a normal farming game, watched, since the farm cycle IS this machine; any Lua error naming lane.lua, route or schedule is an instant revert, lane.lua.bak.394 plus Tinker.lua.bak.394 plus restoring the two .bak.premerge files. Prior build was v0.1.394; the fight-defer of v0.1.393 remains efficacy-unvalidated and its casts-against-fresh-condition read stays in the per-game routine.)') end
+if LOG then LOG:info('Tinker brain v0.1.396 (PHASE 2 OF THE LIB CONSOLIDATION, REFACTOR-ONLY, ZERO behaviour: lib/map.lua ABSORBS lib/nav.lua, lib/towers.lua and lib/position_data.lua, per TINKER_LIB_CONSOLIDATION_PLAN.md, one build after phase 1 VALIDATED at g390. The where-things-are header: map queries, the SafeDest and transport-ladder movement policy over that model, the tower alive and death-ETA registry, and the hand-curated position tables. Bodies moved VERBATIM as sections, mounted as SUB-TABLES Map.Nav, Map.Towers and Map.Positions; nothing flattened, nothing rewritten, no engine call at load. position_data belongs here because it is hand-curated code-cadence data, and its hazard header, read by NOTHING that moves the hero, now leads its section banner; map_data stays OUT because the generator writes it by path. ONE REAL HAZARD WAS PINNED BEFORE THE RENAME: the ENGINE also exposes a global named Towers, the v2.0 Towers.GetAll API, which the old hero-file local shadowed. Verified: the only hero-file reference to Towers.GetAll is a COMMENT describing lib/lane reads, every code site is a lib call, and the live engine reads happen inside lib/lane.lua where no shadow exists; the one renamed comment now says engine global explicitly, and the Towers section banner records the shadowing for the next reader. THE RIPPLE: three requires gone, 21 Nav plus 6 Towers plus 8 Pos call sites repointed, the clear list drops the three names, tools/run_tests repoints its three requires, and the TRIPWIRE gains a map entry with dotted sentinels, TowersInRadius, Nav.SafeDest, Towers.Track and Positions.Shadow, all four verified to resolve as functions before this deploy, so a restored PRE-merge map.lua fails loudly at load naming the missing symbol. HEADROOM: the main chunk falls from 193 to 190 slots, 10 free, the third consecutive build to buy room back. Suite 842 of 842 unchanged. DEPLOY ORDER inside the window, load-bearing as in phase 1: merged map.lua FIRST, hero second, the three absorbed files deleted LAST with .bak.premerge rollbacks. Deployed libs 29 to 26. ACCEPTANCE: one normal watched game, SafeDest clamps and tower-dive gating are watched behaviours; any Lua error naming map, nav, towers or position_data is an instant revert, map.lua.bak.395 plus Tinker.lua.bak.395 plus the three premerge files. Prior build was v0.1.395, VALIDATED at g390 in the same game that validated the v0.1.393 fight-defer live.)') end
 
 return callbacks
