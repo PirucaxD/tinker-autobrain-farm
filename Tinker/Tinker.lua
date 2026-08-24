@@ -2200,6 +2200,31 @@ local function keen_to_anchor(stand, include_creeps)
             return false, "disabler"
         end
     end
+    -- v0.1.397 THE AFFORDABILITY GATE (g360 keen-audit finding #10, re-armed by the two g391
+    -- castless statues at t=353/t=386: keened in at raw 214, post-jump ~139, below March cost,
+    -- stood ~15s casting NOTHING). A commit that cannot fund its March on arrival is unaffordable
+    -- BEFORE it leaves. Non-raid only; TRANSIENT refusal (both callers' whitelists retry it next
+    -- tick without latching keenedSpot into a walk); and it defers ONLY when the Bottle can close
+    -- the gap - stamping keenNoFund lets bottle_tick drink ABOVE its 200 floor (the v0.1.386
+    -- machinery, keen flavour), so raw rises ~60/charge and the keen fires 1-2 ticks later funded.
+    -- If no charges can close it, TODAY'S behaviour stands (no new veto, no regression path).
+    -- Precheck over 15 logs: fires 0.67/game, 7 of 10 are the statue class, 3 of 10 cost one tick
+    -- plus a drink on commits that were fine anyway.
+    if not include_creeps then
+        local kc = abil_mana(State.keen, K.KEEN_MANA_FB)
+        local mc = abil_mana(State.march, K.MARCH_MANA_FB)
+        local short = mc - (mana() - kc)
+        if short > 0 then
+            local bt = NPC.GetItem(State.hero, "item_bottle", true)
+            local ch = (bt and Ability.CanBeExecuted(bt) == -1 and Item.GetCurrentCharges
+                        and Item.GetCurrentCharges(bt)) or 0
+            if ch * K.BOTTLE_MANA_PER_CHARGE >= short then
+                State.keenNoFundT, State.keenNoFundGap = now(), short
+                logline(string.format("keen_defer why=mana raw=%.0f short=%.0f ch=%d", mana(), short, ch))
+                return false, "mana_defer"
+            end
+        end
+    end
     local best = Geometry.BestReachLanding(anchors, { x = stand.x, y = stand.y }, { accept = accept })
     if not best then return keen_skip("no_landing") end
     local cl = best.anchor._land or { x = best.lx, y = best.ly }                    -- the cleared (tree-free) landing
@@ -3142,6 +3167,7 @@ local function ally_farm_priorities()
         -- veto, and the tower-threat stamp is what makes it reliably non-empty at match end.
         State.crashSeen, State.twrThreatLogT = nil, nil
         State.rearmNoFundT, State.rearmNoFundGap, State.rearmNoFundLogT = nil, nil, nil
+        State.keenNoFundT, State.keenNoFundGap = nil, nil   -- v0.1.397
         State.fightSeen = nil   -- v0.1.393 (the scan's clear-then-restamp self-heals this within 2s anyway; cleared here per the match-scoped-latch rule)
         logline("pos_reset new_match")
     end
@@ -5018,7 +5044,7 @@ local function lane_go(dest, raid)
             -- 52+53). Only geometry-stable refusals (no_landing / gain) latch now.
             -- v0.1.258 I1: "disabler" is transient too (the threat leaves; the E1 gate
             -- re-opens the moment reach breaks) - latching it walked the whole leg.
-            if kwhy ~= "cast_failed" and kwhy ~= "disabler" then State.keenedSpot = true end   -- no safe landing: don't retry this spot
+            if kwhy ~= "cast_failed" and kwhy ~= "disabler" and kwhy ~= "mana_defer" then State.keenedSpot = true end   -- no safe landing: don't retry this spot (mana_defer v0.1.397: transient, the bottle is closing the gap)
             kfail = kwhy
         elseif r == "rearm" then
             -- v0.1.209 (user FINAL: safe = blink, no distance gate): a NON-raid leg blinks before
@@ -6141,7 +6167,7 @@ local function fsm_move()
             end
             -- v0.1.258 I1 (the lane_go .234/.258 latch rule, same shape): transient
             -- refusals (cast_failed order-gap, disabler in reach) retry next tick.
-            if kwhy ~= "cast_failed" and kwhy ~= "disabler" then State.keenedSpot = true end   -- no useful anchor hop: just walk from here
+            if kwhy ~= "cast_failed" and kwhy ~= "disabler" and kwhy ~= "mana_defer" then State.keenedSpot = true end   -- no useful anchor hop: just walk from here (mana_defer v0.1.397: transient)
             kfail = kwhy
         elseif try_travel_blink(stand) then
             -- v0.1.209 (user FINAL: "use blink whenever it is safe"): NO distance gate - Keen on
@@ -6894,15 +6920,21 @@ local function bottle_tick()
     -- Identical inside a single match (age is never negative there), so this cannot move a live game.
     local rnfAge = State.rearmNoFundT and (now() - State.rearmNoFundT) or nil
     local wantRearm = rnfAge ~= nil and rnfAge >= 0 and rnfAge < 1.0
+    -- v0.1.397: the keen flavour of the same rung (a lane keen was just deferred for mana the
+    -- charges can cover). Two-sided age per the v0.1.389 rule.
+    local knfAge = State.keenNoFundT and (now() - State.keenNoFundT) or nil
+    local wantKeen = knfAge ~= nil and knfAge >= 0 and knfAge < 1.0
+                     and (State.keenNoFundGap or math.huge) <= ch * K.BOTTLE_MANA_PER_CHARGE
                       and (State.rearmNoFundGap or math.huge) <= ch * K.BOTTLE_MANA_PER_CHARGE
-    if not (lowm or lowh or wantRearm) then return end
+    if not (lowm or lowh or wantRearm or wantKeen) then return end
     if enemy_risk_at(origin(State.hero)) >= K.SHOVE_SAFE_RISK then return end -- bottle breaks on enemy damage
     -- v0.1.386: name the cause. `why=rearm` is the NEW rung and is the acceptance signal for the
     -- conversion fix; lowm/lowh are the pre-existing behaviour and must not change rate.
     if cast_no_target(bottle) then
         logline(string.format("bottle drink why=%s raw=%.0f ch=%d gap=%s",
-            (lowm and "lowm") or (lowh and "lowh") or "rearm", mana(), ch,
-            wantRearm and string.format("%.0f", State.rearmNoFundGap or 0) or "-"))
+            (lowm and "lowm") or (lowh and "lowh") or (wantRearm and "rearm") or "keen", mana(), ch,
+            (wantRearm and string.format("%.0f", State.rearmNoFundGap or 0))
+                or (wantKeen and string.format("%.0f", State.keenNoFundGap or 0)) or "-"))
     end
 end
 
@@ -7789,6 +7821,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-if LOG then LOG:info('Tinker brain v0.1.396 (PHASE 2 OF THE LIB CONSOLIDATION, REFACTOR-ONLY, ZERO behaviour: lib/map.lua ABSORBS lib/nav.lua, lib/towers.lua and lib/position_data.lua, per TINKER_LIB_CONSOLIDATION_PLAN.md, one build after phase 1 VALIDATED at g390. The where-things-are header: map queries, the SafeDest and transport-ladder movement policy over that model, the tower alive and death-ETA registry, and the hand-curated position tables. Bodies moved VERBATIM as sections, mounted as SUB-TABLES Map.Nav, Map.Towers and Map.Positions; nothing flattened, nothing rewritten, no engine call at load. position_data belongs here because it is hand-curated code-cadence data, and its hazard header, read by NOTHING that moves the hero, now leads its section banner; map_data stays OUT because the generator writes it by path. ONE REAL HAZARD WAS PINNED BEFORE THE RENAME: the ENGINE also exposes a global named Towers, the v2.0 Towers.GetAll API, which the old hero-file local shadowed. Verified: the only hero-file reference to Towers.GetAll is a COMMENT describing lib/lane reads, every code site is a lib call, and the live engine reads happen inside lib/lane.lua where no shadow exists; the one renamed comment now says engine global explicitly, and the Towers section banner records the shadowing for the next reader. THE RIPPLE: three requires gone, 21 Nav plus 6 Towers plus 8 Pos call sites repointed, the clear list drops the three names, tools/run_tests repoints its three requires, and the TRIPWIRE gains a map entry with dotted sentinels, TowersInRadius, Nav.SafeDest, Towers.Track and Positions.Shadow, all four verified to resolve as functions before this deploy, so a restored PRE-merge map.lua fails loudly at load naming the missing symbol. HEADROOM: the main chunk falls from 193 to 190 slots, 10 free, the third consecutive build to buy room back. Suite 842 of 842 unchanged. DEPLOY ORDER inside the window, load-bearing as in phase 1: merged map.lua FIRST, hero second, the three absorbed files deleted LAST with .bak.premerge rollbacks. Deployed libs 29 to 26. ACCEPTANCE: one normal watched game, SafeDest clamps and tower-dive gating are watched behaviours; any Lua error naming map, nav, towers or position_data is an instant revert, map.lua.bak.395 plus Tinker.lua.bak.395 plus the three premerge files. Prior build was v0.1.395, VALIDATED at g390 in the same game that validated the v0.1.393 fight-defer live.)') end
+if LOG then LOG:info('Tinker brain v0.1.397 (BEHAVIOURAL, ONE CHANGE, hero-only: THE KEEN AFFORDABILITY GATE, closing the g360 keen-audit finding number 10 six weeks after it was written, re-armed by the two g391 castless statues the operator watched. THE DEFECT: a lane keen committed at raw mana that cannot fund the March on arrival. Both statues keened in at raw 214, landed at about 139 against a March cost of 160, and stood roughly 15 seconds casting NOTHING at a wave locked in a creep fight, then left. The scheduler affordability gate passes on EFFECTIVE mana, which counts Bottle charges, but charges convert at 60 per drink over seconds, and bottle_tick only drinks below its 200 floor, so at raw 214 nothing was converting and the commit was unaffordable BEFORE IT LEFT. THE GATE: inside keen_to_anchor, non-raid legs only, if raw minus the live Keen cost falls short of the live March cost AND the Bottle ready charges can cover the shortfall, the keen DEFERS: it stamps keenNoFund, logs keen_defer why=mana, and returns the TRANSIENT refusal mana_defer, which both caller whitelists retry next tick without latching keenedSpot into a walk, the same class as cast_failed and disabler. The stamp is the keen flavour of the v0.1.386 bottle rung: bottle_tick now drinks ABOVE its floor when a keen was just deferred for a gap the charges cover, two-sided age per the v0.1.389 rule, so raw rises about 60 per charge and the keen fires one or two ticks later, funded. If no charges can close the gap, TODAY behaviour stands unchanged: no new veto, no fountain trip added, no regression path. PRECHECKED OFFLINE over 15 logs on both axes: the gate would fire 0.67 times per game, 7 of 10 firings are the statue class it deletes, and the 3 false positives cost one to two ticks of delay plus one drink on commits that were going to work anyway, the cheapest precision bill of any gate this line has shipped. The bottle drink log why= gains the keen cause. keenNoFundT and Gap join the new-match reset per the match-scoped-latch rule. ACCEPTANCE: grep keen_defer, expect roughly 0 to 2 per game, each followed within about 2 seconds by a bottle drink why=keen and then the keen firing funded; the statue class, a wave-commit keen arriving below March cost and standing castless over 10 seconds, should go to zero. REVERT TRIGGER: keen_defer firing repeatedly on the same commit beyond about 3 seconds, meaning the drink is not closing the gap, or lane keens visibly stalling at the fountain edge. Rollback Tinker.lua.bak.396. Suite 842 of 842, slots 190 of 200 unchanged, libs untouched, hero-only deploy. Prior build was v0.1.396, VALIDATED at g391 by the anomaly hunt that also attributed every watched strangeness: the alien opening was the pre-horn autofarm toggle, and the statues are what this build fixes.)') end
 
 return callbacks
