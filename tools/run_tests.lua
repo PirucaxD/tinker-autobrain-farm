@@ -1,5 +1,5 @@
 #!/usr/bin/env lua
--- tools/run_tests.lua — pure-Lua test runner for hero-brain lib helpers.
+-- tools/run_tests.lua - pure-Lua test runner for hero-brain lib helpers.
 --
 -- Runs unit tests on the lib/ modules that are pure (no game state):
 --   - lib/threat_data.lua's SaveCounters / SeverityOf / CategoryOf / etc.
@@ -97,7 +97,7 @@ local function assert_false(v, msg) if v then error(msg or "expected false", 2) 
 
 local TD = require("lib.threat_data")
 
-describe("lib/threat_data — SAVE_KIND data integrity", function()
+describe("lib/threat_data - SAVE_KIND data integrity", function()
     it("SAVE_KIND populated", function()
         local n = 0
         for _ in pairs(TD.SAVE_KIND) do n = n + 1 end
@@ -132,7 +132,7 @@ describe("lib/threat_data — SAVE_KIND data integrity", function()
     end)
 end)
 
-describe("lib/threat_data — SaveCounters", function()
+describe("lib/threat_data - SaveCounters", function()
     it("BKB counters Bane Nightmare (magic_immune)", function()
         assert_true(TD.SaveCounters("item_black_king_bar", "modifier_bane_nightmare"))
     end)
@@ -149,7 +149,7 @@ describe("lib/threat_data — SaveCounters", function()
     end)
 end)
 
-describe("lib/threat_data — SeverityOf / CategoryOf", function()
+describe("lib/threat_data - SeverityOf / CategoryOf", function()
     it("SeverityOf returns low/medium/high for known threats", function()
         local sev = TD.SeverityOf("modifier_bane_nightmare")
         assert_true(sev == "low" or sev == "medium" or sev == "high",
@@ -205,7 +205,7 @@ describe("lib/threat_data — SeverityOf / CategoryOf", function()
     end)
 end)
 
-describe("lib/threat_data — ENEMY_BUFF_THREATS", function()
+describe("lib/threat_data - ENEMY_BUFF_THREATS", function()
     it("contains expected entries", function()
         assert_true(TD.ENEMY_BUFF_THREATS["modifier_sven_gods_strength"] ~= nil)
         assert_true(TD.ENEMY_BUFF_THREATS["modifier_ursa_enrage"] ~= nil)
@@ -215,12 +215,12 @@ end)
 
 local Target = require("lib.target")
 
-describe("lib/target — pure predicates", function()
+describe("lib/target - pure predicates", function()
     it("NotClone is true for nil-safe", function() assert_false(Target.NotClone(nil)) end)
-    -- More target.lua tests need richer NPC stubs (per-entity behavior) — defer.
+    -- More target.lua tests need richer NPC stubs (per-entity behavior) - defer.
 end)
 
-describe("lib/target — cannot-kill predicates (v0.5.152)", function()
+describe("lib/target - cannot-kill predicates (v0.5.152)", function()
     local e = { idx = 1 }
 
     it("HasUnkillableModifier: shallow grave + false promise; pruned _timer not matched", function()
@@ -262,7 +262,7 @@ end)
 
 local Timing = require("lib.timing")
 
-describe("lib/timing — EscapeReadiness", function()
+describe("lib/timing - EscapeReadiness", function()
     it("returns 0 for entity without items", function()
         local r = Timing.EscapeReadiness({ idx = 1 }, 2.0)
         assert_eq(r, 0)
@@ -2886,7 +2886,7 @@ end)
 
 local ItemSaves = require("lib.item_saves")
 
-describe("lib/item_saves — cyclone_launch_decision", function()
+describe("lib/item_saves - cyclone_launch_decision", function()
     it("nil cp_t -> proceed (fire)", function()
         assert_eq(ItemSaves.cyclone_launch_decision(nil, false), "fire")
         assert_eq(ItemSaves.cyclone_launch_decision(nil, true), "fire")
@@ -2908,7 +2908,7 @@ describe("lib/item_saves — cyclone_launch_decision", function()
     end)
 end)
 
-describe("lib/item_saves — tier 1 bare casts", function()
+describe("lib/item_saves - tier 1 bare casts", function()
     -- stub cfg that records the last issue call + whether a guard fired.
     local function mk_cfg(opts)
         opts = opts or {}
@@ -2964,7 +2964,7 @@ describe("lib/item_saves — tier 1 bare casts", function()
     end)
 end)
 
-describe("lib/item_saves — lotus", function()
+describe("lib/item_saves - lotus", function()
     local mk_cfg = _G.__mk_cfg
     it("gate true -> self cast", function()
         local cfg, rec = mk_cfg()
@@ -2991,7 +2991,7 @@ describe("lib/item_saves — lotus", function()
     end)
 end)
 
-describe("lib/item_saves — cyclones", function()
+describe("lib/item_saves - cyclones", function()
     local mk_cfg = _G.__mk_cfg
     it("WW guarded (already airborne) -> false", function()
         local cfg, rec = mk_cfg()
@@ -3048,7 +3048,7 @@ describe("lib/item_saves — cyclones", function()
     end)
 end)
 
-describe("lib/item_saves — displacement", function()
+describe("lib/item_saves - displacement", function()
     local mk_cfg = _G.__mk_cfg
     it("Force -> self_push delegated", function()
         local cfg = mk_cfg()
