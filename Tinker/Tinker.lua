@@ -21,7 +21,9 @@ if package and package.loaded then
                          "lib.escape", "lib.hero_value", "lib.geometry", "lib.map_data", "lib.channel_gate",
                          "lib.defense", "lib.item_saves", "lib.target",
                          "lib.timing", "lib.hero_data", "lib.ability_data",
-                         "lib.threat_data", "lib.draw", "lib.vision" }) do
+                         "lib.threat_data", "lib.draw" }) do   -- lib.vision entry dropped at v0.1.399: absorbed
+                         -- into lib.escape (whose entry STAYS); the tracker state is store-anchored so this clear
+                         -- refreshes the module without wiping the shared last-seen store.
         package.loaded[m] = nil
     end
 end
@@ -43,7 +45,19 @@ local Defense   = require("lib.defense")      -- ARC E2: the save dispatcher (Li
 local ItemSaves = require("lib.item_saves")   -- ARC E2: hero-agnostic defensive item save bodies (requires lib.target itself; no item_data dependency)
 local Target    = require("lib.target")       -- ARC E2: enemy-hero test for the harvest filter (also loaded transitively by item_saves/escape)
 local Draw      = require("lib.draw")         -- v0.1.324 headroom lift wave 1: screen-space drawing/debug rendering (Font/W2S/Text/WorldText/Ring/Line/Seg/OBox)
-local Vision    = require("lib.vision")       -- v0.1.354: shared last-seen tracker (OnSetDormant); feeds lib/escape FogSnapshot
+-- (lib.vision was ABSORBED into lib.escape at v0.1.399, consolidation phase 3: the tracker is
+-- Escape.Vision now, its state anchored in a package.loaded pseudo-key store so cache-clearing
+-- lib.escape cannot fork it per hero.)
+
+-- Logger is a callable TABLE (not a function); construct via pcall, else a
+-- type=="function" guard silences all logging. Writes [INFO] [Tinker] to
+-- C:\Umbrella\debug.log (same channel as Lina/Sniper).
+-- v0.1.399: DECLARED ABOVE THE TRIPWIRE BLOCK BELOW, which logs through it. It used to sit
+-- below, so the tripwire's `LOG` read resolved as a nil GLOBAL and the guard was permanently
+-- false - the STALE SHARED LIB line could NEVER print, silently, since v0.1.388 (found by the
+-- phase-3 adversarial review; same definition-below-caller class as the v0.1.398 abil_mana fix).
+local LOG
+do local ok, l = pcall(function() return Logger("Tinker") end); if ok then LOG = l end end
 
 -- ── SHARED-LIB TRIPWIRE (v0.1.388) ───────────────────────────────────────────
 -- C:/Umbrella/scripts/lib is ONE directory shared by every hero package a user installs, so a
@@ -69,7 +83,9 @@ do
         -- nil-crashing the hero every decide.
         ["lib/lane.lua"]          = { Lane,     "Lane",     { "DepthRuler", "PushForecast", "Route.Plan", "Schedule.CycleFill" } },
         ["lib/farm.lua"]          = { Farm,     "Farm",     { "CrashCast", "ObservedFarmers" } },
-        ["lib/escape.lua"]        = { Escape,   "Escape",   { "CommitWiden", "NearestEnemyEdge" } },
+        -- v0.1.399: escape absorbed vision (phase 3, the only THREE-HERO file). Dotted sentinel so
+        -- a restored PRE-merge escape.lua fails loudly at load instead of nil-crashing every decide.
+        ["lib/escape.lua"]        = { Escape,   "Escape",   { "CommitWiden", "NearestEnemyEdge", "Vision.Wire" } },
         ["lib/geometry.lua"]      = { Geometry, "Geometry", { "DiscReachPoint" } },
         -- v0.1.396: map absorbed nav+towers+position_data (phase 2). Dotted sentinels so a
         -- restored PRE-merge map.lua fails loudly at load, naming the missing symbol.
@@ -109,11 +125,8 @@ local HERO_KEY = "tinker"
 local State = {}
 
 ----------------------------------------------------------------- telemetry --
--- Logger is a callable TABLE (not a function); construct via pcall, else a
--- type=="function" guard silences all logging. Writes [INFO] [Tinker] to
--- C:\Umbrella\debug.log (same channel as Lina/Sniper).
-local LOG
-do local ok, l = pcall(function() return Logger("Tinker") end); if ok then LOG = l end end
+-- (LOG is declared ABOVE the shared-lib tripwire block near the top of the file - it must
+-- already exist when the tripwire fires at load. See the v0.1.399 note there.)
 
 local function v_level()
     if State.menu and State.menu.diag then return State.menu.diag:Get() end
@@ -829,7 +842,7 @@ local function enemy_snapshot()
         -- inert, and every hero is behaving exactly as it did before lib/vision existed.
         -- vtypes= records the undocumented Enum.DormancyType values so the enum is learned
         -- from a real log instead of guessed.
-        local vs = Vision.Stats()
+        local vs = Escape.Vision.Stats()
         local tks = {}
         for k, n in pairs(vs.types) do tks[#tks + 1] = k .. ":" .. n end
         table.sort(tks)
@@ -2141,6 +2154,15 @@ local function clear_landing(lx, ly, ax, ay, avoid_creeps)
     return nil
 end
 
+-- live (level-scaled) ability mana cost with the Liquipedia fallback (mirrors the rearm-cost read).
+-- v0.1.398: MUST stay ABOVE keen_to_anchor - its affordability gate calls it, and a definition
+-- below the caller resolves as a nil GLOBAL at runtime (the v0.1.351 cd_remaining class; 945
+-- crashes in g392 killed every outbound keen while it sat 600 lines down).
+local function abil_mana(abil, fb)
+    local ok, c = pcall(function() return Ability.GetManaCost and Ability.GetManaCost(abil) end)
+    return (ok and type(c) == "number" and c > 0) and c or fb
+end
+
 -- Keen to the point in a friendly STRUCTURE's reach disc (tower r=700 / outpost r=250) NEAREST the stand.
 -- Keen Conveyance is ground-targeted and drops us AT the cast point as long as a valid ally (a building at
 -- L1) is within reach, so when a tower covers the stand we land ON the stand (travel ~= 0) instead of on
@@ -2832,11 +2854,6 @@ end
 -- Build the unified FarmTarget list (camps + visible lane waves) + run the planner, for the
 -- "Route scan" overlay/log. The FSM is NOT touched: this only computes + shows the plan.
 -- the hero's kinematic state for the planner (pos + move speed + Keen tp + static anchors).
--- live (level-scaled) ability mana cost with the Liquipedia fallback (mirrors the rearm-cost read).
-local function abil_mana(abil, fb)
-    local ok, c = pcall(function() return Ability.GetManaCost and Ability.GetManaCost(abil) end)
-    return (ok and type(c) == "number" and c > 0) and c or fb
-end
 -- mana to ENGAGE the next target = reach (Keen) + one March (gets value). The opportunistic Rearm +
 -- 2nd March are NOT gated here: gating the full 2-March+Rearm clear (~540) would exceed early Tinker's
 -- whole mana pool (~459), so no hop would ever be affordable -> the planner would loop on the refill
@@ -7806,13 +7823,14 @@ State.is_our_hero = function()
     if not h or not Entity.IsEntity(h) or not Entity.IsNPC(h) then return false end
     return NPC.GetUnitName(h) == "npc_dota_hero_" .. HERO_KEY
 end
--- v0.1.354: the shared last-seen tracker. Wired BEFORE the hero gate below on purpose, so
--- its OnSetDormant handler is gated exactly like every other callback and only tracks while
--- we are actually playing Tinker. That also prevents double-counting when another hero
--- brain (Lina/Sniper) is loaded in the same Lua state: lib/vision is a module singleton, so
+-- v0.1.354: the shared last-seen tracker (Escape.Vision since the v0.1.399 phase-3 merge).
+-- Wired BEFORE the hero gate below on purpose, so its OnSetDormant handler is gated exactly
+-- like every other callback and only tracks while we are actually playing Tinker. That also
+-- prevents double-counting when another hero brain (Lina/Sniper) is loaded in the same Lua
+-- state: the tracker state is a store shared by every lib.escape instance, so
 -- both scripts share one tracker, and gating means only the active hero's handler stamps.
-Vision.Init()
-Vision.Wire(callbacks)
+Escape.Vision.Init()
+Escape.Vision.Wire(callbacks)
 
 for cb_name, cb_fn in pairs(callbacks) do
     callbacks[cb_name] = function(...)
@@ -7821,6 +7839,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-if LOG then LOG:info('Tinker brain v0.1.397 (BEHAVIOURAL, ONE CHANGE, hero-only: THE KEEN AFFORDABILITY GATE, closing the g360 keen-audit finding number 10 six weeks after it was written, re-armed by the two g391 castless statues the operator watched. THE DEFECT: a lane keen committed at raw mana that cannot fund the March on arrival. Both statues keened in at raw 214, landed at about 139 against a March cost of 160, and stood roughly 15 seconds casting NOTHING at a wave locked in a creep fight, then left. The scheduler affordability gate passes on EFFECTIVE mana, which counts Bottle charges, but charges convert at 60 per drink over seconds, and bottle_tick only drinks below its 200 floor, so at raw 214 nothing was converting and the commit was unaffordable BEFORE IT LEFT. THE GATE: inside keen_to_anchor, non-raid legs only, if raw minus the live Keen cost falls short of the live March cost AND the Bottle ready charges can cover the shortfall, the keen DEFERS: it stamps keenNoFund, logs keen_defer why=mana, and returns the TRANSIENT refusal mana_defer, which both caller whitelists retry next tick without latching keenedSpot into a walk, the same class as cast_failed and disabler. The stamp is the keen flavour of the v0.1.386 bottle rung: bottle_tick now drinks ABOVE its floor when a keen was just deferred for a gap the charges cover, two-sided age per the v0.1.389 rule, so raw rises about 60 per charge and the keen fires one or two ticks later, funded. If no charges can close the gap, TODAY behaviour stands unchanged: no new veto, no fountain trip added, no regression path. PRECHECKED OFFLINE over 15 logs on both axes: the gate would fire 0.67 times per game, 7 of 10 firings are the statue class it deletes, and the 3 false positives cost one to two ticks of delay plus one drink on commits that were going to work anyway, the cheapest precision bill of any gate this line has shipped. The bottle drink log why= gains the keen cause. keenNoFundT and Gap join the new-match reset per the match-scoped-latch rule. ACCEPTANCE: grep keen_defer, expect roughly 0 to 2 per game, each followed within about 2 seconds by a bottle drink why=keen and then the keen firing funded; the statue class, a wave-commit keen arriving below March cost and standing castless over 10 seconds, should go to zero. REVERT TRIGGER: keen_defer firing repeatedly on the same commit beyond about 3 seconds, meaning the drink is not closing the gap, or lane keens visibly stalling at the fountain edge. Rollback Tinker.lua.bak.396. Suite 842 of 842, slots 190 of 200 unchanged, libs untouched, hero-only deploy. Prior build was v0.1.396, VALIDATED at g391 by the anomaly hunt that also attributed every watched strangeness: the alien opening was the pre-horn autofarm toggle, and the statues are what this build fixes.)') end
+if LOG then LOG:info('Tinker brain v0.1.399 (CONSOLIDATION PHASE 3, the LAST merge and the only THREE-HERO one: lib/escape absorbed lib/vision per TINKER_LIB_CONSOLIDATION_PLAN.md. The tracker is Escape.Vision now; every pre-existing escape export is byte-identical and Lina.lua / Sniper.lua need ZERO edits. THE ONE DELIBERATE EDIT vs the absorbed file, mandated by the phase-3 review: vision state moved to a store anchored under a package.loaded PSEUDO-MODULE KEY, find-or-create once, because Tinker AND Lina cache-clear lib.escape at load and per-instance locals would fork an EMPTY tracker per hero with every gate green - the merged module re-attaches to the SAME store on every re-require, pinned by two offline reload tests that were mutation-verified to fail when the anchor is removed. NOT _G: the UCZone sandbox does not expose _G, per the measured lib/signal.lua v6.15.3 hotfix note - the adversarial review caught a rawget of _G in the first cut that would have crashed all three heroes at load. package.loaded is proven in-engine: shared across hero scripts, writable by every cache-clear list, never cleared at a pseudo-key; if it were ever absent the store degrades to module-local, the pre-merge behaviour, never a crash. The same review also found the v0.1.388 stale-lib tripwire had NEVER been able to print - its LOG read resolved as a nil global because the declaration sat below the block - fixed here by relocation, and the escape entry gains the dotted sentinel Vision.Wire so a restored pre-merge escape.lua now genuinely fails loudly at load. Deploy is lib-first per the plan: merged escape.lua to the five writable sources, deployed dir, tinker tree, lina tree, dota-hero-brains, tinker-public; this Tinker.lua second; vision.lua deleted LAST everywhere. A KNOWN-STALE SIXTH source exists and stays stale by the operator decision that its lineage is Lina-owned: uczone-toolkit ships a 22-export escape.lua; installing its lib over the deployed dir already broke Tinker before this merge and the now-working tripwire names it. Zero behavioural intent, and the v0.1.398 keen-gate acceptance rides unchanged: keen_defer 0-2 per game each followed by a funded keen, statue class zero. ACCEPTANCE for the merge: POSITIVE evidence on Tinker - the fog_probe vev= field, which reads Escape.Vision.Stats, must be NON-ZERO in a real game; for Lina and Sniper the only observable contract is unchanged behaviour - they never call Vision and their FogSnapshot valve reads age 0 exactly as pre-merge - so their leg is a session that loads and plays with zero escape-path errors. KNOWN CEILING, documented in the section banner: the store survives across matches in one client session, so a recycled entity handle can inherit a stale stamp; per consumer that cuts BOTH ways - FogProximityRisk skips a stale-aged enemy, less caution, while AdvanceRiskScore inflates the fog score, more caution. Rollback, lib FIRST: escape.lua.bak.398 + restore lib/vision.lua from vision.lua.bak.premerge, then Tinker.lua.bak.398. Suite 844 of 844 with the 2 new pins, slots 189 of 200, the freed require pays one slot back.)') end
 
 return callbacks

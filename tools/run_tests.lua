@@ -1,5 +1,5 @@
 #!/usr/bin/env lua
--- tools/run_tests.lua - pure-Lua test runner for hero-brain lib helpers.
+-- tools/run_tests.lua — pure-Lua test runner for hero-brain lib helpers.
 --
 -- Runs unit tests on the lib/ modules that are pure (no game state):
 --   - lib/threat_data.lua's SaveCounters / SeverityOf / CategoryOf / etc.
@@ -97,7 +97,7 @@ local function assert_false(v, msg) if v then error(msg or "expected false", 2) 
 
 local TD = require("lib.threat_data")
 
-describe("lib/threat_data - SAVE_KIND data integrity", function()
+describe("lib/threat_data — SAVE_KIND data integrity", function()
     it("SAVE_KIND populated", function()
         local n = 0
         for _ in pairs(TD.SAVE_KIND) do n = n + 1 end
@@ -132,7 +132,7 @@ describe("lib/threat_data - SAVE_KIND data integrity", function()
     end)
 end)
 
-describe("lib/threat_data - SaveCounters", function()
+describe("lib/threat_data — SaveCounters", function()
     it("BKB counters Bane Nightmare (magic_immune)", function()
         assert_true(TD.SaveCounters("item_black_king_bar", "modifier_bane_nightmare"))
     end)
@@ -149,7 +149,7 @@ describe("lib/threat_data - SaveCounters", function()
     end)
 end)
 
-describe("lib/threat_data - SeverityOf / CategoryOf", function()
+describe("lib/threat_data — SeverityOf / CategoryOf", function()
     it("SeverityOf returns low/medium/high for known threats", function()
         local sev = TD.SeverityOf("modifier_bane_nightmare")
         assert_true(sev == "low" or sev == "medium" or sev == "high",
@@ -205,7 +205,7 @@ describe("lib/threat_data - SeverityOf / CategoryOf", function()
     end)
 end)
 
-describe("lib/threat_data - ENEMY_BUFF_THREATS", function()
+describe("lib/threat_data — ENEMY_BUFF_THREATS", function()
     it("contains expected entries", function()
         assert_true(TD.ENEMY_BUFF_THREATS["modifier_sven_gods_strength"] ~= nil)
         assert_true(TD.ENEMY_BUFF_THREATS["modifier_ursa_enrage"] ~= nil)
@@ -215,12 +215,12 @@ end)
 
 local Target = require("lib.target")
 
-describe("lib/target - pure predicates", function()
+describe("lib/target — pure predicates", function()
     it("NotClone is true for nil-safe", function() assert_false(Target.NotClone(nil)) end)
-    -- More target.lua tests need richer NPC stubs (per-entity behavior) - defer.
+    -- More target.lua tests need richer NPC stubs (per-entity behavior) — defer.
 end)
 
-describe("lib/target - cannot-kill predicates (v0.5.152)", function()
+describe("lib/target — cannot-kill predicates (v0.5.152)", function()
     local e = { idx = 1 }
 
     it("HasUnkillableModifier: shallow grave + false promise; pruned _timer not matched", function()
@@ -262,7 +262,7 @@ end)
 
 local Timing = require("lib.timing")
 
-describe("lib/timing - EscapeReadiness", function()
+describe("lib/timing — EscapeReadiness", function()
     it("returns 0 for entity without items", function()
         local r = Timing.EscapeReadiness({ idx = 1 }, 2.0)
         assert_eq(r, 0)
@@ -2886,7 +2886,7 @@ end)
 
 local ItemSaves = require("lib.item_saves")
 
-describe("lib/item_saves - cyclone_launch_decision", function()
+describe("lib/item_saves — cyclone_launch_decision", function()
     it("nil cp_t -> proceed (fire)", function()
         assert_eq(ItemSaves.cyclone_launch_decision(nil, false), "fire")
         assert_eq(ItemSaves.cyclone_launch_decision(nil, true), "fire")
@@ -2908,7 +2908,7 @@ describe("lib/item_saves - cyclone_launch_decision", function()
     end)
 end)
 
-describe("lib/item_saves - tier 1 bare casts", function()
+describe("lib/item_saves — tier 1 bare casts", function()
     -- stub cfg that records the last issue call + whether a guard fired.
     local function mk_cfg(opts)
         opts = opts or {}
@@ -2964,7 +2964,7 @@ describe("lib/item_saves - tier 1 bare casts", function()
     end)
 end)
 
-describe("lib/item_saves - lotus", function()
+describe("lib/item_saves — lotus", function()
     local mk_cfg = _G.__mk_cfg
     it("gate true -> self cast", function()
         local cfg, rec = mk_cfg()
@@ -2991,7 +2991,7 @@ describe("lib/item_saves - lotus", function()
     end)
 end)
 
-describe("lib/item_saves - cyclones", function()
+describe("lib/item_saves — cyclones", function()
     local mk_cfg = _G.__mk_cfg
     it("WW guarded (already airborne) -> false", function()
         local cfg, rec = mk_cfg()
@@ -3048,7 +3048,7 @@ describe("lib/item_saves - cyclones", function()
     end)
 end)
 
-describe("lib/item_saves - displacement", function()
+describe("lib/item_saves — displacement", function()
     local mk_cfg = _G.__mk_cfg
     it("Force -> self_push delegated", function()
         local cfg = mk_cfg()
@@ -3807,8 +3807,8 @@ describe("fog probe <-> analyzer format contract (v0.1.353)", function()
     end)
 end)
 
-describe("lib/vision -- shared last-seen tracker (v0.1.354)", function()
-    local Vision = require("lib.vision")
+describe("lib/escape.Vision -- shared last-seen tracker (v0.1.354; absorbed at v0.1.399)", function()
+    local Vision = require("lib.escape").Vision
     -- The lib OWNS its clock (reading GlobalVars.GetCurTime), so tests drive time by
     -- replacing that stub rather than injecting a clock - no test-only API in production
     -- code. Same idiom as the lib/defense modifier tests. The harness stub is restored at
@@ -3930,9 +3930,9 @@ describe("lib/vision -- shared last-seen tracker (v0.1.354)", function()
     GlobalVars.GetCurTime = _vsav.ct or function() return 0 end
 end)
 
-describe("lib/escape -- FogSnapshot consumes lib/vision (v0.1.354)", function()
+describe("lib/escape -- FogSnapshot consumes the Vision section (v0.1.354)", function()
     local Escape = require("lib.escape")
-    local Vision = require("lib.vision")
+    local Vision = Escape.Vision
     local ME    = { id = "me" }
     local ENEMY = { id = "enemy" }
     -- SAVE every global this block overrides. A previous draft replaced
@@ -3994,6 +3994,46 @@ describe("lib/escape -- FogSnapshot consumes lib/vision (v0.1.354)", function()
     -- restore EVERY override, or the next suite inherits plain-table origins
     Heroes.GetAll, Entity.GetTeamNum, Entity.IsDormant = _sav.ga, _sav.tn, _sav.dm
     Entity.GetAbsOrigin, Hero.GetLastMaphackPos, NPC.IsHero = _sav.ao, _sav.mh, _sav.ih
+    GlobalVars.GetCurTime = _sav.ct or function() return 0 end
+end)
+
+describe("lib/escape.Vision -- the anchored store survives a cache-clear re-require (v0.1.399)", function()
+    -- THE phase-3 judge-5 pin. Tinker.lua AND Lina.lua both nil package.loaded['lib.escape']
+    -- at load; without the package.loaded-pseudo-key anchor each hero would fork an EMPTY tracker with every gate
+    -- green, and Lina/Sniper would read eternally-empty fog ages. This suite does exactly what
+    -- the heroes do and asserts the state survives.
+    local Escape = require("lib.escape")
+    local _sav = { ih = NPC.IsHero, dm = Entity.IsDormant, ct = GlobalVars.GetCurTime }
+    NPC.IsHero = function() return true end
+    Entity.IsDormant = function() return true end
+    local HERO = { id = "reload_hero" }
+
+    it("a stamp written before the cache-clear re-require is readable after it", function()
+        GlobalVars.GetCurTime = function() return 1000 end
+        Escape.Vision.OnSetDormant_handler(HERO, 1)
+        package.loaded["lib.escape"] = nil                 -- what both hero scripts do at load
+        local Escape2 = require("lib.escape")
+        assert_true(Escape2 ~= Escape, "the re-require must build a FRESH module instance")
+        GlobalVars.GetCurTime = function() return 1006 end
+        local a = Escape2.Vision.Age(HERO)
+        assert_true(a ~= nil and math.abs(a - 6.0) < 1e-6,
+            "the age must survive the reload; got " .. tostring(a))
+    end)
+
+    it("Wire idempotence survives the reload: the wired-set lives in the store", function()
+        -- the detectable contract is NO RE-WRAP: a second Wire on an already-wired table must
+        -- leave the handler IDENTITY untouched. (Counting the pre-existing handler's hits
+        -- cannot catch a double-wrap - the original still runs once inside the outer wrapper.)
+        local cbs = { OnSetDormant = function() end }
+        require("lib.escape").Vision.Wire(cbs)
+        local wrapped = cbs.OnSetDormant
+        package.loaded["lib.escape"] = nil
+        require("lib.escape").Vision.Wire(cbs)             -- a FRESH instance wires the SAME table
+        assert_true(cbs.OnSetDormant == wrapped,
+            "a second Wire across a reload must not re-wrap: the wired-set forked")
+    end)
+
+    NPC.IsHero, Entity.IsDormant = _sav.ih, _sav.dm
     GlobalVars.GetCurTime = _sav.ct or function() return 0 end
 end)
 
@@ -4419,6 +4459,10 @@ describe("tier-3 compose-time counter filter", function()
             category_chains = {}, default_chain = {},
             tlog = function() end,
         })
+        -- v0.1.399 hygiene: TD IS the shared require("lib.threat_data") module, so this stub
+        -- must be restored in the cleanup test below or an in-process suite RE-RUN fails
+        -- (found when double-running became the natural check for the anchored vision store).
+        _td_real_categoryof = _td_real_categoryof or d.cfg.TD.CategoryOf
         d.cfg.TD.CategoryOf = function() return "test_cat" end
         return d
     end
@@ -4453,6 +4497,7 @@ describe("tier-3 compose-time counter filter", function()
         TD.THREAT_PROFILE["test_magic_nuke"] = nil
         TD.THREAT_COUNTER["test_phys_chase"] = nil
         TD.THREAT_COUNTER["test_magic_nuke"] = nil
+        if _td_real_categoryof then TD.CategoryOf = _td_real_categoryof end   -- v0.1.399 hygiene
         assert_true(true)
     end)
 end)
