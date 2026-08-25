@@ -2303,7 +2303,13 @@ local function keen_to_anchor(stand, include_creeps)
         end
         return true
     end
-    return keen_skip("cast_failed")   -- v0.1.233: the 4th silent exit (order not issued - channeling/silence/mana at fire time)
+    -- v0.1.400: the comment here used to blame "channeling/silence/mana at fire time", which is
+    -- PROVABLY IMPOSSIBLE and sent readers hunting the wrong cause for 18 logs. issue() has
+    -- EXACTLY ONE false path - the ORDER_GAP rate guard at :619 - because issue_def below it has
+    -- no false return at all. So cast_failed means one thing: another order (classically the
+    -- fountain chain-drink bottle) shared this 0.05s tick and swallowed ours. That is transient
+    -- and retries fine, which is exactly why :5058 whitelists it against the don't-retry latch.
+    return keen_skip("cast_failed")   -- v0.1.233: the 4th silent exit (order swallowed by the ORDER_GAP rate guard)
 end
 
 -- v0.1.253: the DECIDE half of the .252 raid_far gate (run-69: 19 raid_rejects = the raid-capped
@@ -5704,6 +5710,17 @@ local function fsm_move_wave(s)
     do
         local ds = (s.standSpot and s.standSpot.stand) and me:Distance(s.standSpot.stand) or -1
         local cl = s.wgClose or 0
+        -- v0.1.400 (LOG-ONLY): tarr is computed ONCE, on the SAME ruler as the gate it explains.
+        -- It used to be guarded by `cl > 0` while every real consumer gates on
+        -- `wgClose >= W_CLOSING_MIN` (:5739 fire path, :5844, :6053) - bug class 3, the exact
+        -- defect the stand_far line below warns about. The closing EMA (:5657, x0.6 per tick with
+        -- rate 0) DECAYS GEOMETRICALLY toward zero on a stationary wave without ever reaching it,
+        -- so a held wave printed tarr from a 1e-15 divisor: g394 logged tarr=6.7e27 and g391/g392
+        -- the same shape, escalating ~1e5 per tick. `close=%.0f` rendered that divisor as "0",
+        -- which is why the rows read as a divide-by-zero that the code does not contain. NOTHING
+        -- BEHAVIOURAL EVER CONSUMED IT: the fire gate clears W_CLOSING_MIN before it divides, so
+        -- no cast was ever made on a garbage lead. -1 is the established not-applicable sentinel.
+        local tarr_d = (cl >= K.W_CLOSING_MIN) and ((dref - K.ANTICIP_RANGED_REACH) / cl) or -1
         local why
         if (State.marchCasts or 0) ~= 0 then why = "cast_done"
         elseif State.marchPending then why = "pending"
@@ -5717,7 +5734,7 @@ local function fsm_move_wave(s)
         elseif ds > K.W_PRE_LEAD_R then why = "stand_far"   -- v0.1.374: MIRRORS the fire gate's own bound (:5237). A diagnostic on a different ruler than the gate it explains is bug class 3, and this row is the only instrument that names why the lead refused.
         elseif effective_mana() < abil_mana(State.march, K.MARCH_MANA_FB) + abil_mana(State.rearm, K.REARM_MANA_FB) then why = "mana"
         elseif State.fightSeen and State.fightSeen[s.lane] and now() - State.fightSeen[s.lane] <= K.FIGHT_HOLD_S then why = "fight"   -- v0.1.393: the defer, named - THE acceptance signal
-        elseif cl > 0 and ((dref - K.ANTICIP_RANGED_REACH) / cl) > K.W_LEAD_S then why = "lead_bar"
+        elseif tarr_d > K.W_LEAD_S then why = "lead_bar"   -- unchanged in effect: `slow` above already owns every cl < W_CLOSING_MIN, and the -1 sentinel cannot exceed the bar
         end
         -- v0.1.371 SHIP 0 (log-only): also emit the row the tick the closing EMA ARMS. s.wgN
         -- passes through exactly 2 once per warm-up episode (nil->1->2, reset wholesale at
@@ -5728,9 +5745,8 @@ local function fsm_move_wave(s)
         if why and (now() >= (State.wLeadLogT or 0) or (s.wgN or 0) == 2) then
             State.wLeadLogT = now() + 1.0
             logline(string.format(
-                "w_lead_reject why=%s ln=%s tarr=%.2f eff=%.2f dref=%.0f close=%.0f dstand=%.0f n=%d wgn=%d",
-                why, tostring(s.lane), (cl > 0) and ((dref - K.ANTICIP_RANGED_REACH) / cl) or -1,
-                (cl > 0) and ((dref - K.ANTICIP_RANGED_REACH) / cl) or -1, dref, cl, ds, live.n or 0, s.wgN or 0))
+                "w_lead_reject why=%s ln=%s tarr=%.2f eff=%.2f dref=%.0f close=%.3f dstand=%.0f n=%d wgn=%d",
+                why, tostring(s.lane), tarr_d, tarr_d, dref, cl, ds, live.n or 0, s.wgN or 0))
         end
     end
     if (State.marchCasts or 0) == 0 and not State.marchPending and ready(State.march)
@@ -7839,6 +7855,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-if LOG then LOG:info('Tinker brain v0.1.399 (CONSOLIDATION PHASE 3, the LAST merge and the only THREE-HERO one: lib/escape absorbed lib/vision per TINKER_LIB_CONSOLIDATION_PLAN.md. The tracker is Escape.Vision now; every pre-existing escape export is byte-identical and Lina.lua / Sniper.lua need ZERO edits. THE ONE DELIBERATE EDIT vs the absorbed file, mandated by the phase-3 review: vision state moved to a store anchored under a package.loaded PSEUDO-MODULE KEY, find-or-create once, because Tinker AND Lina cache-clear lib.escape at load and per-instance locals would fork an EMPTY tracker per hero with every gate green - the merged module re-attaches to the SAME store on every re-require, pinned by two offline reload tests that were mutation-verified to fail when the anchor is removed. NOT _G: the UCZone sandbox does not expose _G, per the measured lib/signal.lua v6.15.3 hotfix note - the adversarial review caught a rawget of _G in the first cut that would have crashed all three heroes at load. package.loaded is proven in-engine: shared across hero scripts, writable by every cache-clear list, never cleared at a pseudo-key; if it were ever absent the store degrades to module-local, the pre-merge behaviour, never a crash. The same review also found the v0.1.388 stale-lib tripwire had NEVER been able to print - its LOG read resolved as a nil global because the declaration sat below the block - fixed here by relocation, and the escape entry gains the dotted sentinel Vision.Wire so a restored pre-merge escape.lua now genuinely fails loudly at load. Deploy is lib-first per the plan: merged escape.lua to the five writable sources, deployed dir, tinker tree, lina tree, dota-hero-brains, tinker-public; this Tinker.lua second; vision.lua deleted LAST everywhere. A KNOWN-STALE SIXTH source exists and stays stale by the operator decision that its lineage is Lina-owned: uczone-toolkit ships a 22-export escape.lua; installing its lib over the deployed dir already broke Tinker before this merge and the now-working tripwire names it. Zero behavioural intent, and the v0.1.398 keen-gate acceptance rides unchanged: keen_defer 0-2 per game each followed by a funded keen, statue class zero. ACCEPTANCE for the merge: POSITIVE evidence on Tinker - the fog_probe vev= field, which reads Escape.Vision.Stats, must be NON-ZERO in a real game; for Lina and Sniper the only observable contract is unchanged behaviour - they never call Vision and their FogSnapshot valve reads age 0 exactly as pre-merge - so their leg is a session that loads and plays with zero escape-path errors. KNOWN CEILING, documented in the section banner: the store survives across matches in one client session, so a recycled entity handle can inherit a stale stamp; per consumer that cuts BOTH ways - FogProximityRisk skips a stale-aged enemy, less caution, while AdvanceRiskScore inflates the fog score, more caution. Rollback, lib FIRST: escape.lua.bak.398 + restore lib/vision.lua from vision.lua.bak.premerge, then Tinker.lua.bak.398. Suite 844 of 844 with the 2 new pins, slots 189 of 200, the freed require pays one slot back.)') end
+if LOG then LOG:info('Tinker brain v0.1.400 (LOG-ONLY plus two doc fixes, ZERO behaviour, hero-only. THE TARR DIAGNOSTIC RULER FIX: w_lead_reject printed tarr and eff from a guard of cl greater than zero while every real consumer gates on wgClose at or above W_CLOSING_MIN 80, which is bug class 3, a diagnostic on a different ruler than the gate it explains, the exact defect the stand_far line warns about twelve lines above it. The closing EMA multiplies by 0.6 each tick with rate zero, so on a stationary wave it DECAYS GEOMETRICALLY toward zero without ever reaching it, and the diagnostic then divided a 357 numerator by 1e-15: g394 printed tarr 6.7e27 escalating about 1e5 per tick, g391 and g392 the same shape. close was rendered %.0f so that divisor printed as 0, which is why the rows read as a divide-by-zero this code does not contain. NOTHING BEHAVIOURAL EVER CONSUMED IT and that is by construction, not by luck: the fire gate clears W_CLOSING_MIN before it divides, so no cast was ever made on a garbage lead, and the why label was already correct because the slow branch owns every cl below the minimum before lead_bar is reached. tarr is now computed ONCE into a local on the gate ruler, printing the established -1 sentinel when not applicable, and close prints %.3f so a tiny divisor can never masquerade as zero again. THE COMMENT DEFECT: the cast_failed exit blamed channeling, silence or mana at fire time, which is PROVABLY IMPOSSIBLE and misdirected readers for 18 logs: issue has exactly ONE false path, the ORDER_GAP rate guard, because issue_def has no false return at all, so cast_failed means only that another order shared the 0.05s tick, which is why the retry whitelist exists. Both re-verified in source this session rather than trusted from the handoff. Changelog backfilled for v0.1.378-382, reconstructed from their commits. Suite 844 of 844, luac clean, slots unchanged, libs untouched. Acceptance: the next log has NO tarr above about 30 and NO close=0 on a w_lead_reject row; every riding acceptance is unchanged, the keen gate still awaits its class.)') end
 
 return callbacks
