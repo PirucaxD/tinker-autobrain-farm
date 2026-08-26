@@ -204,7 +204,7 @@ to get it fixed.
 Offline development loop:
 
 ```
-lua tools/run_tests.lua          # pure-Lua suite, expect 832 passing
+lua tools/run_tests.lua          # pure-Lua suite, expect 844 passing
 luac -p Tinker/Tinker.lua        # byte-compile check
 ```
 
