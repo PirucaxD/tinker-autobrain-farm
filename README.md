@@ -6,9 +6,33 @@ reacts to enemy disables and threats with defensive item saves and escapes.
 It never auto-engages enemy heroes. Offense and combo layers are planned
 follow-ups on the same shared `lib/`.
 
-Current build: **Tinker.lua v0.1.374**.
+Current build: **Tinker.lua v0.1.400**.
 
-## What changed since v0.1.331 (for returning testers)
+## What changed since v0.1.374 (for returning testers)
+
+- **The shared libraries were consolidated (v0.1.395 to v0.1.399).** Five libs
+  were absorbed into the three that already owned their domain: `route` and
+  `schedule` into `lane` (now `Lane.Route` / `Lane.Schedule`), `nav` and
+  `towers` into `map` (`Map.Nav` / `Map.Towers`), and `vision` into `escape`
+  (`Escape.Vision`). Fewer files, one require each, and every previous export
+  keeps its name. If you install more than one hero package into the same
+  `scripts/lib`, note that the older packages ship the pre-merge files.
+- **A stale-library tripwire that never worked (v0.1.399).** The check that
+  warns you when another package overwrites a shared lib with an older copy
+  read its logger before that logger existed, so it had been silently unable
+  to print since it was added. It works now, which matters if you run several
+  hero scripts side by side.
+- **Keen affordability (v0.1.397 to v0.1.398).** A lane teleport that could not
+  fund its March on arrival used to commit anyway and then stand there. It now
+  defers a tick or two and drinks a bottle charge first when that closes the
+  gap. Shipped with a scope bug that broke teleports outright for one build;
+  v0.1.398 is the fixed one.
+- **Diagnostics honesty (v0.1.400).** The `w_lead_reject` line printed a
+  time-to-arrival computed on a different threshold than the gate it was
+  explaining, so a held wave logged absurd values like `tarr=6.7e27`. It was
+  never read by anything that casts. Log-only fix.
+
+## What changed in the v0.1.331 to v0.1.374 line
 
 Real-game reference on this line: GPM roughly 420-500 with zero brain-owned
 deaths. Highlights:
@@ -96,10 +120,18 @@ game, so short games read low. Do not compare two games of different lengths.
 - `lib/` - hero-agnostic libraries: map/camp data, lane wave scanning and
   prediction, route planning, scheduling, navigation, escape and risk math,
   plus KV-generated game data. Pure logic is engine-stubbed and unit-tested.
-- `tools/run_tests.lua` - the offline test suite (832 tests, no game needed).
+- `tools/run_tests.lua` - the offline test suite (844 tests, no game needed).
 - `tools/parse_debuglog.lua` - the log analyzer (farm/depth audits, per-wave
   coverage, time and gold accounting, keen efficiency). Useful when
   reporting issues.
+
+Comments in the code sometimes point at a design doc by name, like
+`TINKER_SCHEDULE_DESIGN.md` or `TINKER_W_GEOMETRY_STUDY.md`. Those live in the
+private development repo and are not shipped here, so the file names will not
+resolve. They are left in deliberately: each one marks a decision that was
+measured rather than guessed, and the comment right next to it carries the
+conclusion, which is the part you actually need to read the code. Nothing in
+the shipped code depends on them.
 
 ## Requirements
 
