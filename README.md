@@ -6,12 +6,22 @@ reacts to enemy disables and threats with defensive item saves and escapes.
 It never auto-engages enemy heroes. Offense and combo layers are planned
 follow-ups on the same shared `lib/`.
 
-Current build: **Tinker.lua v0.1.400**. The script file, the in-game menu and
+Current build: **Tinker.lua v0.1.401**. The script file, the in-game menu and
 the log lines all still identify themselves as `Tinker` (the log analyzer and
 every saved log key off that), so only the project name changed here.
 
 ## What changed since v0.1.374 (for returning testers)
 
+- **Comment and documentation pass (v0.1.401).** No behaviour: the code is
+  byte-identical to v0.1.400 once comments are stripped, and only the version
+  banner differs. Every hard source line-number reference inside comments was
+  replaced by the name of the function or symbol it pointed at, because those
+  numbers rot on every edit and several were already pointing at the wrong
+  place. A number of comments that described the code incorrectly were also
+  corrected against the source, including a tower-safety radius, a March
+  coverage figure, and several references to libraries that were merged away in
+  v0.1.395 to v0.1.399. If you read the source to understand the brain, this is
+  the release that makes that cheaper.
 - **The shared libraries were consolidated (v0.1.395 to v0.1.399).** Five libs
   were absorbed into the three that already owned their domain: `route` and
   `schedule` into `lane` (now `Lane.Route` / `Lane.Schedule`), `nav` and
