@@ -3113,7 +3113,6 @@ local function pos_commit(src, bits)
         end
     end
     if #parts == 0 then return end
-    State.posFinalSrc = src
     table.sort(parts)
     logline(string.format("pos_commit src=%s n=%d %s", src, #parts, table.concat(parts, " ")))
 end
@@ -3184,13 +3183,13 @@ local function ally_farm_priorities()
     -- available new-match signal. 30s of slack because the clock is negative during pre-game and the
     -- first samples land after the horn.
     if State.posT and now() < State.posT - 30 then
-        State.posFinal, State.posFinalSrc, State.posLogged = nil, nil, nil
+        State.posFinal, State.posLogged = nil, nil
         State.posEngine, State.posLaneTally, State.posProbed = nil, nil, nil
         -- v0.1.389: this reset exists BECAUSE there is no OnGameStart/OnGameEnd hook anywhere in the
         -- script, and v0.1.385/.386 then added match-scoped latches without extending it. crashSeen
         -- is the one that matters: it gates defend_crash, the verdict that outranks every economic
         -- veto, and the tower-threat stamp is what makes it reliably non-empty at match end.
-        State.crashSeen, State.twrThreatLogT = nil, nil
+        State.crashSeen = nil
         State.rearmNoFundT, State.rearmNoFundGap, State.rearmNoFundLogT = nil, nil, nil
         State.keenNoFundT, State.keenNoFundGap = nil, nil   -- v0.1.397
         State.fightSeen = nil   -- v0.1.393 (the scan's clear-then-restamp self-heals this within 2s anyway; cleared here per the match-scoped-latch rule)
@@ -7108,7 +7107,6 @@ local function tick()
 end
 
 -- ── debug overlay (calibration view) ─────────────────────────────────────────
-local DBG = { font = nil }
 -- v0.1.324 headroom lift wave 1: the screen-space drawing family (dbg_font/w2s/dbg_text/
 -- world_text/world_ring/world_line/world_seg/world_obox) moved to lib/draw.lua as
 -- Draw.Font/W2S/Text/WorldText/Ring/Line/Seg/OBox - bodies unchanged, the font cache
@@ -7653,7 +7651,9 @@ end
 local callbacks = {}
 
 function callbacks.OnUpdateEx()
-    State.frame_t = now()   -- per-frame clock sample (skeleton idiom; tick fns read now())
+    State.frame_t = now()   -- skeleton universal per-frame sample. UNREAD BY TINKER, whose tick
+                            -- functions call now() directly; retained for skeleton conformance and
+                            -- for the deferred GetGameTime to GlobalVars.GetCurTime clock rewire.
     if not Engine.IsInGame() then return end
     if not State.hero then
         local h = Heroes.GetLocal()
@@ -7857,6 +7857,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-if LOG then LOG:info('Tinker brain v0.1.401 (POLISH PASS. ZERO BEHAVIOUR, PROVEN: the comment-stripped code stream is byte-identical to v0.1.400 at 191234 chars, so only comments moved. No constant, no gate, no order, no logged token and no menu path changed. 112 comment edits. THE ROTTING LINE-NUMBER CLASS IS DEAD: 84 hard in-file line citations went to 0, each replaced by the FUNCTION or SYMBOL it meant, because they rot on every edit and had already sent two readers to the wrong place. The real count was 84, not the 48 the handoff estimated. ALSO FIXED, comments that were confidently WRONG about the code, each re-derived from source: tower_safe documented as 900 when ATTACK_RANGE 900 plus SAFE_MARGIN 100 is 1000; the March overhang documented as 300 when 1200 reach past a 1000 stand is 200; lane_unsafe documented as tripping near 800 when the taper solves to 975; a gate citing REARM_SAFE_RISK, which is defined nowhere; try_travel_blink claimed to use Escape.BlinkInLanding, which it never calls; a defense block still labelled INERT until Task 3 that has been live for many builds; T1DOWN_LEASH documented as 1100 when it is 3000. Citations to the libs deleted in phases 0 to 3, schedule and nav and position_data, now name the merged accessors. TWO HANDOFF ITEMS REFUTED: tools/scan_locals.lua is NOT broken, it was rewritten 2026-08-19 to parse luac and reads 189 of 200 correctly; and crash_fresh_any is 7 lines, not 480, the handoff attached fsm_decide size to a nested helper. NOTHING was extracted from fsm_move_wave: it spans 998 lines but only 478 are code, and an exhaustive pure-leaf scan found a single 7-line candidate, so splitting it stays out of scope. Suite 844 of 844, luac clean, slots 189 of 200 unchanged, libs untouched. QUEUED CODE BUGS FOUND, NONE FIXED HERE: Ability.GetCooldownTimeRemaining does not exist in the UCZone API yet is read at four sites, and inside hop_mana_cost it falls back to a fabricated 5 second wait that prices transport; the stack commit does not clear State.moveTrack although the invariant it documents says every commit does; the DEATH save census walks DEFAULT_SAVE_CHAIN, which has no item_blink, so a Tinker dying holding only the dagger logs NONE_OWNED. ACCEPTANCE: one watched game whose only job is that NOTHING changed.)') end
+if LOG then LOG:info('Tinker brain v0.1.402 (CLEANUP. Dead code removal, provably zero behaviour: every symbol removed had ZERO readers anywhere in the repo, the deployed tree or the two sibling hero trees. THREE REMOVALS: the empty DBG table left behind by the v0.1.324 draw lift, whose own comment already said DBG.font was retired; the write-only State.posFinalSrc provenance field, whose value is already emitted by the pos_commit log line the acceptance procedure actually reads; and State.twrThreatLogT from the new-match reset, a 2.0s log throttle that was DELETED at v0.1.391 while its reset entry outlived it. PROOF, function level rather than asserted: 221 protos before and after, EXACTLY THREE differing, and each delta maps to one intended statement (main 1198 to 1193, pos_commit 54 to 53, ally_farm_priorities 546 to 543). Every other function is byte-identical. callbacks.OnUpdateEx stays at 387 instructions, which is the guard proving State.frame_t was NOT removed: it is unread by Tinker but mandated by the three-hero skeleton and named by the deferred clock rewire, so it is retained and its comment now says so instead of implying it is consumed. HEADROOM: the main chunk drops 189 to 188 of Lua 200 local slots, the first slot bought back in a long time and the scarcest resource in this file. Also this pass, outside the code: 276 backup files reclaimed from the deployed directory, 73 MB, every one proven byte-recoverable from git history by content hash, with the three newest rollbacks and the 54 pre-repo builds that git does not contain deliberately KEPT. Suite 844 of 844, luac clean, libs untouched, deployed cmp-verified. ACCEPTANCE: nothing to watch. No symbol removed was read by anything, so behaviour cannot differ.)') end
 
 return callbacks
