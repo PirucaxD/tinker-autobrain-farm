@@ -7788,10 +7788,33 @@ function callbacks.OnUpdateEx()
             State.deathT = now()
             local saves = {}
             local okp, p = pcall(origin, State.hero)   -- a dead hero's origin can throw
+            -- v0.1.406: ready() is Ability.CanBeExecuted, and on a DEAD hero it has NEVER RUN in
+            -- production: all 7 DEATH lines in the 44-log corpus read NONE_OWNED, so the loop
+            -- below always found nil and never reached the readiness call. NPC.GetItem IS proven
+            -- safe there (about 70 dead-hero calls, all returning nil, no throw), but the origin
+            -- guard on the line above exists precisely because SOME dead-hero reads throw. So the
+            -- readiness read is pcall-guarded and prints `:?` when the call itself fails, which is
+            -- honest rather than fabricating `:cd`. A throw here would kill the whole OnUpdate
+            -- tick on the one event the instrument exists to record.
+            local function up_or_cd(ab)
+                local okr, r = pcall(ready, ab)
+                if not okr then return ":?" end
+                return r and ":up" or ":cd"
+            end
             for _, n in ipairs(DEFAULT_SAVE_CHAIN) do
                 local it = NPC.GetItem(State.hero, n, true)
-                if it then saves[#saves + 1] = n:gsub("^item_", "") .. (ready(it) and ":up" or ":cd") end
+                if it then saves[#saves + 1] = n:gsub("^item_", "") .. up_or_cd(it) end
             end
+            -- v0.1.406: the dagger is censused SEPARATELY and on purpose. DEFAULT_SAVE_CHAIN is the
+            -- DISPATCHER's list and correctly contains no item_blink (the dispatcher must not treat
+            -- a travel/escape dagger as a chain save), but Tinker's ENTIRE escape doctrine IS the
+            -- dagger. So a hero who died holding only a blink logged saves=NONE_OWNED, which is
+            -- exactly the "he had nothing" misreading the v0.1.356 instrument was built to abolish,
+            -- and it corrupts the evidence base of every deaths question. Observation only: nothing
+            -- dispatches off this. DO NOT "simplify" it by adding item_blink to DEFAULT_SAVE_CHAIN,
+            -- that list is walked by the save dispatcher and would be a behaviour change.
+            local okb, bl = pcall(blink_item)
+            if okb and bl then saves[#saves + 1] = "blink" .. up_or_cd(bl) end
             logline(string.format("DEATH t=%.1f fsm=%s spot=%s mana=%.0f pos=%s saves=%s",
                 now(), tostring(State.fsm), tostring(State.spot and State.spot.kind), mana(),
                 (okp and p) and string.format("(%.0f,%.0f)", p.x, p.y) or "?",
@@ -7900,6 +7923,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-if LOG then LOG:info('Tinker brain v0.1.405 (LOG-ONLY, three format strings and one comment. THE BEHAVIOURAL FIX WAS DESIGNED AND REFUSED. The operator watched Tinker keen to a camp 1.1s before a mid wave landed, and the mechanism is real: a VETO-driven jungle (thin_wave, far_wave, gone_by_arrival, no_safe_stand, deep_skip) arms NO lane-clock deadline, because shoveLeaveBy is set only when the reason is slack, so a committed camp is blind to the lane clock for the whole travel and clear leg. FOUR MEASUREMENTS KILLED THE FIX. ONE: the watched episode is net POSITIVE. The mid wave GOLD decayed only 175 to 135 across the blackout while the camp returned 85 and he served the wave anyway, so he was up about 45 gold; the hp collapse from 1959 to 502 that looked like a lost wave is creeps dying to our own tower, which pays nobody. TWO: engage_preempt has fired ZERO times in 43 logs, so the preemption path being extended is DEAD CODE, not a working feature withheld from veto-jungles; on the 11 occasions it was armed the camp finished first every time. THREE: 79 percent of the target population is deep era, where the shipped policy explicitly flattens the window and drops mid preemption on purpose, so the fix would contradict a deliberate policy on four fifths of its own targets. FOUR: every candidate deadline is net negative at minus 475 to minus 16 gold per game, and the tight variants reproduce the reverted regression that once produced 138 zero-cast camps in one game plus a stuck and a death. WHAT SHIPPED INSTEAD is the one datum the corpus lacks, engage-side wall clock: engage_arrived gains t, and the TWO CAMP-PATH march cast lines gain t (the three WAVE-path stamps are deliberately untouched). With the existing 2.0s wavescan pred and kpred, that reconstructs offline, for EVERY candidate clock, exactly when it would have expired and what marchCasts was at that instant. ZERO BEHAVIOUR: 222 protos before and after, exactly two changed, and the regression is impossible by construction since this diff contains no write to shoveLeaveBy and no new now() comparison (still 7 sites, 1 comparison). Suite 844 of 844, luac clean. ACCEPTANCE: nothing to watch.)') end
+if LOG then LOG:info('Tinker brain v0.1.406 (LOG-ONLY: the DEATH save census can finally see the dagger. THE DEFECT: the census walked DEFAULT_SAVE_CHAIN, which correctly contains NO item_blink because that list belongs to the save DISPATCHER, while the entire Tinker escape doctrine IS the dagger. So a hero who died holding only a blink logged saves=NONE_OWNED, which is precisely the he-had-nothing misreading that the v0.1.356 instrument was built to abolish, and it silently corrupted the evidence base of every deaths question: a death with an escape available but on cooldown was indistinguishable from a death with no escape at all. The dagger is now censused SEPARATELY, reusing the existing blink_item helper, and prints as blink:up or blink:cd alongside the chain. DEFAULT_SAVE_CHAIN IS DELIBERATELY UNTOUCHED, verified at 0 occurrences of item_blink: the dispatcher walks that list, and adding the dagger there would be a real behaviour change that turns a travel and escape item into a chain save. THE READINESS READ IS PCALL-GUARDED, both for the dagger and for the pre-existing chain loop: ready is Ability.CanBeExecuted and on a DEAD hero it has NEVER RUN in production, since all 7 DEATH lines in the 44-log corpus read NONE_OWNED so the loop always found nil and never reached it. NPC.GetItem is proven safe there, about 70 dead-hero calls all returning nil, but the origin guard one line above exists precisely because SOME dead-hero reads throw, and a throw here would kill the whole OnUpdate tick on the one event the instrument exists to record. A failed read prints question-mark rather than fabricating cd. OBSERVATION ONLY, nothing dispatches off this, and the analyzer prints the saves field verbatim without parsing its contents, so no consumer can break. blink_item is defined far above the census, so this is not the definition-below-caller class. Suite 844 of 844, luac clean, all 208 format sites clean, 222 protos before and after with EXACTLY ONE changed. ACCEPTANCE: nothing to watch. The next brain-owned death, whenever one happens, will name the dagger instead of claiming there was nothing.)') end
 
 return callbacks

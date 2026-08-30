@@ -6,12 +6,19 @@ reacts to enemy disables and threats with defensive item saves and escapes.
 It never auto-engages enemy heroes. Offense and combo layers are planned
 follow-ups on the same shared `lib/`.
 
-Current build: **Tinker.lua v0.1.405**. The script file, the in-game menu and
+Current build: **Tinker.lua v0.1.406**. The script file, the in-game menu and
 the log lines all still identify themselves as `Tinker` (the log analyzer and
 every saved log key off that), so only the project name changed here.
 
 ## What changed since v0.1.374 (for returning testers)
 
+- **Death logging now sees the Blink Dagger (v0.1.406).** No behaviour. The
+  death log lists which escape items you held and whether each was ready, but it
+  walked the save-dispatcher's item list, which deliberately does not include the
+  dagger. So a hero who died holding only a dagger was logged as holding nothing,
+  which is the exact misreading the death instrument exists to prevent. The
+  dagger is now listed separately, and the readiness check is failure-guarded so
+  a death can never be lost to an error while recording it.
 - **Diagnostics and documentation (v0.1.403 to v0.1.405).** No behaviour in any
   of the three. v0.1.403 corrected three comments that described the tree and
   tower code incorrectly, including one that invited a source reordering which
