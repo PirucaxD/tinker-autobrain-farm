@@ -4742,8 +4742,22 @@ local function fsm_decide()
         c.aggroAt, c.fleeUntil, c.aggroed = first.stackWin.aggro_at, first.stackWin.done, false
         c.clearEst, c.planCost = first.clear_t or 0, 0
         State.spot, State.marchCasts, State.fsm = c, 0, "MOVE"
-    State.keenedSpot = false   -- v0.1.286 (run-94 1:30 cross-map walks): a NEW commit is a NEW leg - the stale latch skipped the keen rung and walked 7700+ (why=latched)
+        State.keenedSpot = false   -- v0.1.286 (run-94 1:30 cross-map walks): a NEW commit is a NEW leg - the stale latch skipped the keen rung and walked 7700+ (why=latched)
         State.moveSince = now()
+        -- v0.1.408: this commit cleared ONLY keenedSpot and moveSince, while its CAMP sibling
+        -- clears five per-spot latches. A stack leg therefore entered fsm_move carrying the
+        -- PREVIOUS spot state, contradicting the invariant stated at the no_progress definition
+        -- (State.moveTrack resets per committed spot) and able to false-trip that watchdog on
+        -- arrival. Bug class 2, stale state at a commit site.
+        -- MEASURED DORMANT, which is why this is behaviourally free: pick=stack occurs 0 times in
+        -- 45 logs, and stackWin/aggroAt, written ONLY in this block, appear 0 times in any log.
+        -- The gate is first.kind == stack and the route planner has never returned one.
+        -- SEPARATE OPEN QUESTION, do not conflate: whether the v0.1.224 timed-aggro stack
+        -- maneuver is reachable AT ALL. This fix only makes the block correct for the day it runs.
+        State.moveTrack = nil        -- reset the P0 no-progress watchdog for the new spot
+        State.rearmStepback = nil    -- v0.1.267: a step-back belongs to the OLD spot engage
+        State.marchPending = nil
+        State.emptySince = nil
         ft.ctype, ft.cgold = c.type, math.floor(c.gold or 0)
         ft.sx, ft.sy = string.format("%.0f", st.x), string.format("%.0f", st.y)
         emit_farm("stack")
@@ -7923,6 +7937,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-if LOG then LOG:info('Tinker brain v0.1.406 (LOG-ONLY: the DEATH save census can finally see the dagger. THE DEFECT: the census walked DEFAULT_SAVE_CHAIN, which correctly contains NO item_blink because that list belongs to the save DISPATCHER, while the entire Tinker escape doctrine IS the dagger. So a hero who died holding only a blink logged saves=NONE_OWNED, which is precisely the he-had-nothing misreading that the v0.1.356 instrument was built to abolish, and it silently corrupted the evidence base of every deaths question: a death with an escape available but on cooldown was indistinguishable from a death with no escape at all. The dagger is now censused SEPARATELY, reusing the existing blink_item helper, and prints as blink:up or blink:cd alongside the chain. DEFAULT_SAVE_CHAIN IS DELIBERATELY UNTOUCHED, verified at 0 occurrences of item_blink: the dispatcher walks that list, and adding the dagger there would be a real behaviour change that turns a travel and escape item into a chain save. THE READINESS READ IS PCALL-GUARDED, both for the dagger and for the pre-existing chain loop: ready is Ability.CanBeExecuted and on a DEAD hero it has NEVER RUN in production, since all 7 DEATH lines in the 44-log corpus read NONE_OWNED so the loop always found nil and never reached it. NPC.GetItem is proven safe there, about 70 dead-hero calls all returning nil, but the origin guard one line above exists precisely because SOME dead-hero reads throw, and a throw here would kill the whole OnUpdate tick on the one event the instrument exists to record. A failed read prints question-mark rather than fabricating cd. OBSERVATION ONLY, nothing dispatches off this, and the analyzer prints the saves field verbatim without parsing its contents, so no consumer can break. blink_item is defined far above the census, so this is not the definition-below-caller class. Suite 844 of 844, luac clean, all 208 format sites clean, 222 protos before and after with EXACTLY ONE changed. ACCEPTANCE: nothing to watch. The next brain-owned death, whenever one happens, will name the dagger instead of claiming there was nothing.)') end
+if LOG then LOG:info('Tinker brain v0.1.408 (STALE LATCH at the stack commit site, bug class 2. That commit cleared ONLY keenedSpot and moveSince, while its CAMP sibling clears FIVE per-spot latches, so a stack leg entered fsm_move carrying the PREVIOUS spot state. That contradicts the invariant stated at the no_progress definition, State.moveTrack resets per committed spot, and could false-trip that watchdog on arrival. It now clears the same five: moveTrack, rearmStepback, marchPending, emptySince alongside keenedSpot. The mis-indented keenedSpot line, a leftover from whatever patch created the gap, is straightened too. THIS IS BEHAVIOURALLY FREE AND HERE IS THE PROOF: the block is MEASURED DORMANT. pick=stack occurs 0 times in 45 logs on a boundary-safe count, and stackWin and aggroAt, which are written ONLY inside this block, appear 0 times in any log, so the path has never executed. An earlier count of pick=mid and pick=top was MY OWN grep artifact: the pattern matched inside dpick=, which is why the census is now anchored on the field separator. SEPARATE QUESTION, QUEUED, do not conflate with this fix: whether the v0.1.224 timed-aggro stack maneuver is REACHABLE AT ALL, since the gate is first.kind equals stack and the route planner has never returned one. This change only makes the block correct for the day it runs. Suite 844 of 844, luac clean, 208 format sites clean, exactly one proto changed. ACCEPTANCE: nothing to watch, the path does not execute.)') end
 
 return callbacks

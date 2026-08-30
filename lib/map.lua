@@ -85,12 +85,6 @@ function Map.Camps()
     return out
 end
 
----Neutral camps near a position, same descriptor shape.
-function Map.CampsInRadius(pos, r)
-    local out = {}
-    for _, c in ipairs(Camps.InRadius(pos, r) or {}) do out[#out + 1] = _camp_desc(c) end
-    return out
-end
 
 ---Live neutral creeps currently inside the camp's box (R1 primitive). Alive,
 ---non-dormant, not waiting to spawn. The hero reads .hp / .gold off these.
@@ -112,19 +106,7 @@ function Map.CampCreeps(camp, neutrals)
     return _filter_in_box(neutrals or Map.AllNeutrals(), pb, function(n) return Entity.GetAbsOrigin(n) end)
 end
 
----R1: does the camp currently have live creeps?
-function Map.CampOccupied(camp)
-    return #Map.CampCreeps(camp) > 0
-end
 
----Nearest anchor entity to `target` from a caller-supplied list (friendly
----buildings/creeps the hero enumerates). origin_of defaults to Entity.GetAbsOrigin.
----Hero-agnostic: the math is pure (_nearest); only the default reader touches the engine.
----@return any|nil anchor
----@return number|nil distance
-function Map.NearestAnchor(target, anchors)
-    return _nearest(target, anchors, function(a) return Entity.GetAbsOrigin(a) end)
-end
 
 -- ---- towers / trees / pathing / ground -----------------------------------
 
@@ -139,34 +121,13 @@ function Map.TreesInRadius(pos, r)
     return Trees.InRadius(pos, r, true) or {}
 end
 
----Nearest standing tree to pos within radius r (default 1200). Returns (tree, pos).
-function Map.NearestTree(pos, r)
-    local best, bestpos, bestd = nil, nil, math.huge
-    for _, t in ipairs(Map.TreesInRadius(pos, r or 1200)) do
-        local tp = Entity.GetAbsOrigin(t)
-        if tp then
-            local dx, dy = tp.x - pos.x, tp.y - pos.y
-            local d = dx * dx + dy * dy
-            if d < bestd then best, bestpos, bestd = t, tp, d end
-        end
-    end
-    return best, bestpos
-end
 
 ---World ground position at (x, y) with the correct Z.
 function Map.GroundPos(x, y)
     return Vector(x, y, World.GetGroundZ(x, y))
 end
 
----Real pathfinding waypoints from start to dest (GridNav.BuildPath).
-function Map.Path(start, dest)
-    return GridNav.BuildPath(start, dest) or {}
-end
 
----Is there a walkable path from start to dest?
-function Map.PathExists(start, dest)
-    return GridNav.IsTraversableFromTo(start, dest) == true
-end
 
 ---Is a single position walkable?
 function Map.Walkable(pos)
