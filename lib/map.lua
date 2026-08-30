@@ -271,7 +271,7 @@ end
 ---best tree-hide blink landing (the pure half of the lane tree-blink feature): the tree whose
 ---standing-tree CLUSTER is densest, within blink range of `from`, and at least opts.threat_min from
 ---`threat`. Score = cluster size; ties -> farther from the threat. nil when nothing qualifies.
----trees = { {x,y}, ... } (the caller reads the standing trees near the hero, e.g. Map.TreesNear).
+---trees = { {x,y}, ... } (the caller reads the standing trees near the hero via Map.TreesInRadius).
 ---@param opts table|nil { blink_max = 950, cluster_r = 250, min_trees = 4, threat_min = 800 }
 ---@return table|nil { x, y }
 function Nav.TreeHideSpot(trees, from, threat, opts)
@@ -305,10 +305,16 @@ end
 -- ============================================================================
 -- TOWERS section (v0.1.396 phase 2: lib/towers.lua absorbed VERBATIM). The
 -- tower alive/death-ETA registry (the Towers.Track state-in/state-out pattern).
--- NOTE the ENGINE also exposes a global `Towers` (Towers.GetAll, the v2.0
--- tower API); inside this file the local shadows it, and nothing here calls
--- the engine - the live reads happen in lib/lane.lua's _read_towers, where the
--- global is visible. Mounted as Map.Towers below.
+-- >>> NAME HAZARD, READ BEFORE REORDERING ANYTHING IN THIS FILE. <<< The ENGINE
+-- also exposes a global `Towers` (Towers.InRadius, Towers.GetAll, the v2.0 tower
+-- API). The `local Towers` declared just below shadows it ONLY FROM ITS OWN
+-- DECLARATION LINE ONWARD. Map.TowersInRadius is defined ABOVE that line, so it
+-- binds the ENGINE global, which is correct and is what it has always done
+-- (pre-v0.1.396 this file had no local of that name at all). THE TRAP: this local
+-- registry provides Track/Alive/DeathEta and NO InRadius, so hoisting the local
+-- above Map.TowersInRadius, or moving that function below it, silently turns every
+-- tower query into a nil-call at runtime. luac cannot catch it. lib/lane.lua's
+-- _read_towers sees the engine global too. Mounted as Map.Towers below.
 -- ============================================================================
 
 ---lib/towers.lua - per-tower registry: alive flag + measured hp-slope death prediction.

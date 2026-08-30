@@ -6,12 +6,21 @@ reacts to enemy disables and threats with defensive item saves and escapes.
 It never auto-engages enemy heroes. Offense and combo layers are planned
 follow-ups on the same shared `lib/`.
 
-Current build: **Tinker.lua v0.1.402**. The script file, the in-game menu and
+Current build: **Tinker.lua v0.1.405**. The script file, the in-game menu and
 the log lines all still identify themselves as `Tinker` (the log analyzer and
 every saved log key off that), so only the project name changed here.
 
 ## What changed since v0.1.374 (for returning testers)
 
+- **Diagnostics and documentation (v0.1.403 to v0.1.405).** No behaviour in any
+  of the three. v0.1.403 corrected three comments that described the tree and
+  tower code incorrectly, including one that invited a source reordering which
+  would have silently broken every tower query. v0.1.404 added a refusal census
+  to the escape blink: that function previously logged only on success, so when
+  it declined there was no way to tell which gate refused. v0.1.405 added
+  engage-side timestamps so a camp trip can be reconstructed offline against the
+  wave clock. If you are reading logs, v0.1.404 and v0.1.405 give you strictly
+  more to read.
 - **Dead code removal (v0.1.402).** No behaviour: three symbols were removed
   and every one of them had zero readers anywhere, verified across this repo,
   the deployed tree and the two sibling hero packages. The proof is at function

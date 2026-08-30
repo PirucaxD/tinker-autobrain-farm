@@ -1429,7 +1429,36 @@ end
 -- the nearest threat (Map.Nav.TreeHideSpot on Map.TreesInRadius) - breaks vision AND pathing; the open
 -- safest-spot pick stays the fallback when no cluster qualifies.
 local function try_escape_blink()
-    if not can_blink("escape") then return false end
+    -- v0.1.404 census (the v0.1.214 blink_skip lesson, never applied to this twin): this
+    -- function logged ONLY on success, so every refusal was invisible and the 0 firings across
+    -- 25 logs could not be told apart from a broken gate. Distinct token `esc_skip`, NOT
+    -- `blink_skip` (that is the TRAVEL census and mixing them would corrupt both populations)
+    -- and not `blink_escape*` (that is the SUCCESS line). Same 2.0s throttle, own stamp.
+    local function skip(why)
+        if now() - (State.lastEscSkipLog or -99) > 2.0 then
+            State.lastEscSkipLog = now()
+            logline("esc_skip why=" .. why)
+        end
+        return false
+    end
+    if not can_blink("escape") then
+        local it = blink_item()
+        -- same order and labels as the travel census so the two are comparable. NOTE
+        -- broken_damage cannot currently fire: lib.damage is not required by this hero, so
+        -- blink_broken() is permanently false (bridge Q2). The arm is kept so it starts
+        -- working the moment Q2 is fixed.
+        -- WHY THE SECOND is_channeling() CALL IS SAFE (can_blink already made one): both of its
+        -- mutations sit behind `if State.keenPending`/`if State.rearmPending` guards, so once the
+        -- first call has cleared a latch the second skips that block entirely and returns the
+        -- same value. Idempotent within a tick. The labels are right for the same reason: true
+        -- here means can_blink refused ON the channel, false means it fell through to debounce.
+        return skip((not (State.menu.blinkEscape and State.menu.blinkEscape:Get())) and "menu_off"
+            or (not it) and "no_item"
+            or (not ready(it)) and "item_cd"
+            or blink_broken() and "broken_damage"
+            or is_channeling() and "channeling"
+            or "debounce")
+    end
     State.fog = State.fog or enemy_snapshot()
     local me = origin(State.hero)
     local threat, bestd
@@ -1443,7 +1472,8 @@ local function try_escape_blink()
     -- 200u tree hop escapes (the panic was NEUTRAL damage at the ancient pair; the blink burned
     -- the dagger, hid nowhere, and the keen-home right after covers the actual escape). Blink
     -- only when a hero threat is plausibly in reach.
-    if not threat or bestd > K.RISK_RADIUS then return false end
+    if not threat then return skip("no_threat") end
+    if bestd > K.RISK_RADIUS then return skip("threat_far") end
     local trees = {}
     for _, t in ipairs(Map.TreesInRadius(me, K.BLINK_CLAMP) or {}) do
         local tp = Entity.GetAbsOrigin(t)
@@ -1451,7 +1481,10 @@ local function try_escape_blink()
     end
     local hide = Map.Nav.TreeHideSpot(trees, { x = me.x, y = me.y }, threat, { blink_max = K.BLINK_CLAMP })
     if hide then
-        hide = Map.SnapWalkable(hide, { x = me.x, y = me.y })       -- land beside the cluster, not IN a tree
+        hide = Map.SnapWalkable(hide, { x = me.x, y = me.y })       -- nearest GridNav-walkable point to the
+        -- cluster. It is TREE-BLIND (GridNav.IsTraversable does not flag trees, see KEEN_TREE_CLEAR), so this
+        -- can land INSIDE the grove. That is the intent here, the grove is the vision cover we are blinking to;
+        -- it is the opposite of clear_landing, which needs tree-FREE ground and tests trees explicitly.
         if do_blink(Vector(hide.x, hide.y, me.z)) then
             logline(string.format("blink_escape tree dest=(%.0f,%.0f)", hide.x, hide.y))
             return true
@@ -1462,7 +1495,11 @@ local function try_escape_blink()
         logline(string.format("blink_escape dest=(%.0f,%.0f)", dest.x, dest.y))
         return true
     end
-    return false
+    -- both pickers declined. trees= names whether the cluster search even had candidates, which
+    -- separates a thin forest from a picker that refuses a forest it can see.
+    return skip((not hide) and string.format("no_cluster trees=%d", #trees)
+        or (not dest) and "no_spot"
+        or "cast_failed")
 end
 
 -- Travel blink: close a medium gap to the farm stand faster than walking, when SAFE (reserve the
@@ -4472,6 +4509,12 @@ local function fsm_decide()
             -- camp, never farmed it (138x casts=0 this game), re-vetoed, and churned at a deep outpost
             -- (stuck + death). Clearing it lets the vetoed-jungle camp actually farm; next decide (every
             -- DECIDE_GAP) re-evaluates the wave and shoves once it is feasible.
+            -- CORRECTION (v0.1.405): that re-evaluation only happens while the hero is STILL in
+            -- DECIDE (pick=none). A camp/stack dispatch sets fsm=MOVE, and fsm_move has NO leave_by
+            -- check of any kind, so a committed camp is blind to the lane clock for the whole
+            -- travel+clear leg. Do NOT read the line above as a claim that the wave is safe during
+            -- a commit. MEASURED: engage_preempt has fired ZERO times in 43 logs, so this whole
+            -- preemption path is dead code, not a working feature withheld from veto-jungles.
             State.shoveLeaveBy = (d and d.reason == "slack") and d.leave_by or nil
             State.shoveTravel  = d and sc.plan.travel_to_mid or nil   -- to-mid ETA; folds into the horizon (BUG 2)
             State.shoveReturnPos = sc and sc.crash_pos or nil          -- BUG 2: where the camp planner must return to (mid meeting)
@@ -6172,7 +6215,7 @@ local function fsm_move()
         State.emptySince = nil
         State.engageStart = now()                   -- timing calib: mark the clear start (vs clearEst)
         State.engageMana  = mana()                  -- v0.1.212 cost-truth census: raw mana at clear start
-        logline(string.format("engage_arrived d=%.0f dCast=%.0f", d, dCast)); return
+        logline(string.format("engage_arrived t=%.1f d=%.0f dCast=%.0f", now(), d, dCast)); return
     end
     -- P0 watchdog: are we actually closing toward the stand? A far keen landing (d2stand large) onto
     -- terrain we cannot path through leaves the hero walking in place -> never arrives, never times out
@@ -6690,7 +6733,7 @@ local function fsm_engage()
         if mp0 and (State.marchCasts or 0) >= K.MIN_CASTS_BEFORE_EMPTY then
             if (not ready(State.march)) or cd_remaining(State.march) > mp0.cdBefore + 0.05 then
                 State.marchCasts = State.marchCasts + 1; State.marchPending = nil
-                logline("march cast=" .. State.marchCasts)
+                logline(string.format("march cast=%d t=%.1f", State.marchCasts or 0, now()))
             else
                 local me0 = origin(State.hero)
                 if issue(UO.DOTA_UNIT_ORDER_MOVE_TO_POSITION, nil, nil, me0) then   -- bypass move_to: the dedup must not eat the cancel
@@ -6723,7 +6766,7 @@ local function fsm_engage()
         if (not ready(State.march)) or cd_remaining(State.march) > mp.cdBefore + 0.05 then
             State.marchCasts = State.marchCasts + 1
             State.marchPending = nil
-            logline("march cast=" .. State.marchCasts)
+            logline(string.format("march cast=%d t=%.1f", State.marchCasts or 0, now()))
             -- (leave-by preempt now checked unconditionally at the top of fsm_engage, note 3)
         elseif now() > mp.expire then
             State.marchPending = nil
@@ -7857,6 +7900,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-if LOG then LOG:info('Tinker brain v0.1.402 (CLEANUP. Dead code removal, provably zero behaviour: every symbol removed had ZERO readers anywhere in the repo, the deployed tree or the two sibling hero trees. THREE REMOVALS: the empty DBG table left behind by the v0.1.324 draw lift, whose own comment already said DBG.font was retired; the write-only State.posFinalSrc provenance field, whose value is already emitted by the pos_commit log line the acceptance procedure actually reads; and State.twrThreatLogT from the new-match reset, a 2.0s log throttle that was DELETED at v0.1.391 while its reset entry outlived it. PROOF, function level rather than asserted: 221 protos before and after, EXACTLY THREE differing, and each delta maps to one intended statement (main 1198 to 1193, pos_commit 54 to 53, ally_farm_priorities 546 to 543). Every other function is byte-identical. callbacks.OnUpdateEx stays at 387 instructions, which is the guard proving State.frame_t was NOT removed: it is unread by Tinker but mandated by the three-hero skeleton and named by the deferred clock rewire, so it is retained and its comment now says so instead of implying it is consumed. HEADROOM: the main chunk drops 189 to 188 of Lua 200 local slots, the first slot bought back in a long time and the scarcest resource in this file. Also this pass, outside the code: 276 backup files reclaimed from the deployed directory, 73 MB, every one proven byte-recoverable from git history by content hash, with the three newest rollbacks and the 54 pre-repo builds that git does not contain deliberately KEPT. Suite 844 of 844, luac clean, libs untouched, deployed cmp-verified. ACCEPTANCE: nothing to watch. No symbol removed was read by anything, so behaviour cannot differ.)') end
+if LOG then LOG:info('Tinker brain v0.1.405 (LOG-ONLY, three format strings and one comment. THE BEHAVIOURAL FIX WAS DESIGNED AND REFUSED. The operator watched Tinker keen to a camp 1.1s before a mid wave landed, and the mechanism is real: a VETO-driven jungle (thin_wave, far_wave, gone_by_arrival, no_safe_stand, deep_skip) arms NO lane-clock deadline, because shoveLeaveBy is set only when the reason is slack, so a committed camp is blind to the lane clock for the whole travel and clear leg. FOUR MEASUREMENTS KILLED THE FIX. ONE: the watched episode is net POSITIVE. The mid wave GOLD decayed only 175 to 135 across the blackout while the camp returned 85 and he served the wave anyway, so he was up about 45 gold; the hp collapse from 1959 to 502 that looked like a lost wave is creeps dying to our own tower, which pays nobody. TWO: engage_preempt has fired ZERO times in 43 logs, so the preemption path being extended is DEAD CODE, not a working feature withheld from veto-jungles; on the 11 occasions it was armed the camp finished first every time. THREE: 79 percent of the target population is deep era, where the shipped policy explicitly flattens the window and drops mid preemption on purpose, so the fix would contradict a deliberate policy on four fifths of its own targets. FOUR: every candidate deadline is net negative at minus 475 to minus 16 gold per game, and the tight variants reproduce the reverted regression that once produced 138 zero-cast camps in one game plus a stuck and a death. WHAT SHIPPED INSTEAD is the one datum the corpus lacks, engage-side wall clock: engage_arrived gains t, and the TWO CAMP-PATH march cast lines gain t (the three WAVE-path stamps are deliberately untouched). With the existing 2.0s wavescan pred and kpred, that reconstructs offline, for EVERY candidate clock, exactly when it would have expired and what marchCasts was at that instant. ZERO BEHAVIOUR: 222 protos before and after, exactly two changed, and the regression is impossible by construction since this diff contains no write to shoveLeaveBy and no new now() comparison (still 7 sites, 1 comparison). Suite 844 of 844, luac clean. ACCEPTANCE: nothing to watch.)') end
 
 return callbacks
