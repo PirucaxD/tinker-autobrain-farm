@@ -85,7 +85,10 @@ do
         ["lib/farm.lua"]          = { Farm,     "Farm",     { "CrashCast", "ObservedFarmers" } },
         -- v0.1.399: escape absorbed vision (phase 3, the only THREE-HERO file). Dotted sentinel so
         -- a restored PRE-merge escape.lua fails loudly at load instead of nil-crashing every decide.
-        ["lib/escape.lua"]        = { Escape,   "Escape",   { "CommitWiden", "NearestEnemyEdge", "Vision.Wire" } },
+        -- v0.1.409: Vision.ShadowAges added (build 1 of the fog-tracker arc). A pre-.409
+        -- escape.lua still has Vision.Wire, so without this sentinel a stale copy would pass
+        -- the tripwire and then nil-crash at the first shadow-risk read.
+        ["lib/escape.lua"]        = { Escape,   "Escape",   { "CommitWiden", "NearestEnemyEdge", "Vision.Wire", "Vision.ShadowAges" } },
         ["lib/geometry.lua"]      = { Geometry, "Geometry", { "DiscReachPoint" } },
         -- v0.1.396: map absorbed nav+towers+position_data (phase 2). Dotted sentinels so a
         -- restored PRE-merge map.lua fails loudly at load, naming the missing symbol.
@@ -846,9 +849,9 @@ local function enemy_snapshot()
         local tks = {}
         for k, n in pairs(vs.types) do tks[#tks + 1] = k .. ":" .. n end
         table.sort(tks)
-        logline(string.format("fog_probe t=%.1f off=%.1f vis=%d fog=%d vtrack=%d vev=%d vtypes=%s",
+        logline(string.format("fog_probe t=%.1f off=%.1f vis=%d fog=%d vtrack=%d vev=%d vtypes=%s vsh=%d",
             now(), cur - now(), vis, fog, vs.tracked, vs.events,
-            (#tks > 0) and table.concat(tks, ",") or "-"))
+            (#tks > 0) and table.concat(tks, ",") or "-", (vs.tracked_sh or 0)))
         local me = origin(State.hero)
         for i = 1, #snap.heroes do
             local h = snap.heroes[i]
@@ -870,10 +873,14 @@ local function enemy_snapshot()
                 end
                 -- age_now is logged WITHOUT escape.lua's `if age < 0 then age = 0` clamp on
                 -- purpose: the negative number IS the evidence.
+                -- v0.1.409: age_real now carries the SHADOW age (the dtype-gated tracker), the
+                -- raw material for the offline age_cap sweep. raw/age_now stay wired to
+                -- Hero.GetLastVisibleTime as standing evidence that THAT getter is dead.
+                local ash = Escape.Vision.AgeShadow(h.entity)
                 logline(string.format("fog_hero raw=%s age_now=%s age_real=%s d=%.0f name=%s",
                     raw and string.format("%.1f", raw) or "nil",
                     raw and string.format("%.1f", now() - raw) or "nil",
-                    raw and string.format("%.1f", cur - raw) or "nil",
+                    ash and string.format("%.1f", ash) or "nil",
                     d, nm))
             end
         end
@@ -992,9 +999,22 @@ end
 -- UNMODIFIED lib function, verified bit-identical to a lib-side opts.widen over 1.2M hero
 -- evaluations, so lib/escape.lua takes zero modified lines and Lina/Sniper cannot be touched.
 -- 21 of the 22 reads pass nothing: `widen or 0` keeps them bit-identical (x + 0.0 == x).
-local function enemy_risk_at(pt, widen)
+local function enemy_risk_at(pt, widen, shadow)
     if not pt then return 0 end
     local snap = State.fog or enemy_snapshot()   -- per-decide snapshot (set in fsm_decide); avoids rebuilding it ~40x
+    if shadow then
+        -- v0.1.409 build 1 (TINKER_FOG_TRACKER_DESIGN.md): the SHADOW twin of this read - same
+        -- constants, same weight_fn, ages from the dtype-gated shadow tracker instead of the
+        -- never-stamping live one. LOG-ONLY: the only callers passing shadow=true are the
+        -- prisk_sh/crisk_sh riders, and no decision reads their output. Cached per live
+        -- snapshot IDENTITY: all per-decide reads reuse one copy, and every State.fog
+        -- assignment site invalidates it automatically (new identity, recompute).
+        -- No new-match reset needed for the same reason.
+        if State.fogShSrc ~= snap then
+            State.fogShSrc, State.fogSh = snap, Escape.Vision.ShadowAges(snap)
+        end
+        snap = State.fogSh
+    end
     -- v0.1.247 CRASH FIX (found by a tester of the public mirror, field-verified): several
     -- callers pass a PLAIN {x,y} table (safe_stand_for's raid_safe stand from Map.Nav.SafeDest/
     -- Map.SnapWalkable, lane_unsafe's pos, lane_go dests) while FogProximityRisk calls
@@ -3357,10 +3377,12 @@ local function gather_route_targets(allies, our_pri)
     end
     local function emit_single(c)
         local marches = marches_life(c.type, c.ehp, c.gold)
-        local crisk = math.min(1, enemy_risk_at(c.center) + Farm.StructuralRisk({ x = c.center.x, y = c.center.y }, ropts))
+        local sr = Farm.StructuralRisk({ x = c.center.x, y = c.center.y }, ropts)
+        local crisk = math.min(1, enemy_risk_at(c.center) + sr)
+        local crisk_sh = math.min(1, enemy_risk_at(c.center, nil, true) + sr)   -- v0.1.409 SHADOW rider (StructuralRisk is fog-independent, computed once)
         out[#out + 1] = {
             kind = "camp", lane = "jungle", pos = { x = c.center.x, y = c.center.y },
-            value = eff_gold(c), clear_t = clear_time(marches), risk = crisk,
+            value = eff_gold(c), clear_t = clear_time(marches), risk = crisk, risk_sh = crisk_sh,
             contested = Farm.IsContestedByAlly(c.center, allies, { radius = K.CONTEST_RADIUS, min_value = our_pri }),
             ref = c, mana_cost = mana_for(marches), hp_cost = crisk * K.HP_RISK_DMG,
         }
@@ -3381,6 +3403,7 @@ local function gather_route_targets(allies, our_pri)
         local b = g.b and camp_cands[g.b] or nil
         local midv = b and Vector((a.center.x + b.center.x) / 2, (a.center.y + b.center.y) / 2, a.center.z) or nil
         local er = midv and enemy_risk_at(midv) or 1
+        local er_sh = midv and enemy_risk_at(midv, nil, true) or 1   -- v0.1.409 SHADOW rider
         -- v0.1.189 (user economics, FINAL): a pair costs the TANKIER camp's marches = the SAME
         -- mana as clearing that camp alone, for TWO camps' gold - the pair STRICTLY DOMINATES.
         -- Never split one: the v0.1.182 fundable->singles degrade (obsolete since the v0.1.183
@@ -3391,11 +3414,13 @@ local function gather_route_targets(allies, our_pri)
         if b and er < K.RISK_HARD then
             local mid = { x = midv.x, y = midv.y }
             local marches = math.max(marches_life(a.type, a.ehp, a.gold), marches_life(b.type, b.ehp, b.gold))
-            local crisk = math.min(1, er + Farm.StructuralRisk(mid, ropts))
+            local sr = Farm.StructuralRisk(mid, ropts)
+            local crisk = math.min(1, er + sr)
+            local crisk_sh = math.min(1, er_sh + sr)   -- v0.1.409 SHADOW rider
             local pc = Farm.PairClearClass(g.d, { march_len = K.MARCH_LEN, disc = K.CREEP_DISC })
             out[#out + 1] = {
                 kind = "camp", lane = "jungle", pos = mid, value = eff_gold(a) + eff_gold(b),
-                clear_t = clear_time(marches), risk = crisk,
+                clear_t = clear_time(marches), risk = crisk, risk_sh = crisk_sh,
                 contested = Farm.IsContestedByAlly(mid, allies, { radius = K.CONTEST_RADIUS, min_value = our_pri }),
                 ref = a, partnerRef = b, pairClass = pc.class, pairPd = g.d,
                 mana_cost = mana_for(marches), hp_cost = crisk * K.HP_RISK_DMG,
@@ -3898,6 +3923,10 @@ local function schedule_ctx(lanes)
     -- gank corridor; sample the straight hero->stand route and treat a hot corridor as unsafe too.
     local prisk = Farm.PathRisk({ x = me.x, y = me.y }, stand,
         function(pt) return enemy_risk_at(Vector(pt.x, pt.y, 0)) end)
+    -- v0.1.409 SHADOW rider (build 1, TINKER_FOG_TRACKER_DESIGN.md): the same corridor priced
+    -- with shadow ages. Log-only; nothing reads it but the trace.
+    local prisk_sh = Farm.PathRisk({ x = me.x, y = me.y }, stand,
+        function(pt) return enemy_risk_at(Vector(pt.x, pt.y, 0), nil, true) end)
     -- COMMIT RISK v2 (mid producer): the exposure term is travel_to_mid, the KEEN-AWARE
     -- Lane.InterceptETA above (raid-capped to KEEN_CHANNEL + 1.5). The load-bearing claim is that
     -- NO NEW dist/move_speed is computed inside the risk path, not that this value is never walk
@@ -3988,6 +4017,7 @@ local function schedule_ctx(lanes)
         dpts = dpts,                                        -- Risk v2 axis 1: the stand's depth points (ft.dpts calibration)
         thin1 = lone or nil,                                -- v0.1.345 FIX B signature (-> ft.thin1)
         path_risk = prisk,                                  -- item 6: worst enemy risk along hero->stand (calibrate PATH_RISK_MAX)
+        path_risk_sh = prisk_sh,                            -- v0.1.409 SHADOW rider (log-only)
         bal = bal,                                          -- item 7: push-sim balance (trace only; timing folded into arrival/asrc=sim)
         covers = covers,                                    -- ON (anticipation): safe_stand_for found a covering stand; nil when OFF
         cwhy = cwhy,                                        -- v0.1.203: WHY covers failed (tower|cover|depth|leash|dpts) - the leash-era analyzability rule
@@ -4438,6 +4468,7 @@ local function fsm_decide()
                 ft.thin1   = sc.thin1 and K.HOME_LANE or nil       -- v0.1.345 FIX B signature
                 ft.recfits = d.recover_fits and "y" or "n"  -- Plan v2 recover fit (calibration only)
                 ft.prisk   = string.format("%.2f", sc.path_risk or 0)   -- item 6: corridor risk
+                ft.prisk_sh = sc.path_risk_sh and string.format("%.2f", sc.path_risk_sh) or nil   -- v0.1.409 SHADOW rider
                 if sc.bal then ft.bal = string.format("%d", sc.bal) end   -- item 7: push-sim balance (asrc=sim when it set the deadline)
             end
         end
@@ -4823,6 +4854,7 @@ local function fsm_decide()
     ft.ctype, ft.cgold, ft.cstk = spot.type, math.floor(spot.gold or 0), camp_stacks(spot.gold, spot.type)
     ft.csrc, ft.cval = spot.source or "est", math.floor(first.value or 0)
     ft.crisk = string.format("%.2f", first.risk or 0)
+    ft.crisk_sh = first.risk_sh and string.format("%.2f", first.risk_sh) or nil   -- v0.1.409 SHADOW rider (camp nodes only; wave/refill nodes carry no risk_sh)
     ft.ncreep, ft.paired = #(spot.creeps or {}), tostring(ss.paired or false)
     ft.cx, ft.cy = math.floor(spot.center.x), math.floor(spot.center.y)
     ft.sx, ft.sy = math.floor(ss.stand.x), math.floor(ss.stand.y)
@@ -7937,6 +7969,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-if LOG then LOG:info('Tinker brain v0.1.408 (STALE LATCH at the stack commit site, bug class 2. That commit cleared ONLY keenedSpot and moveSince, while its CAMP sibling clears FIVE per-spot latches, so a stack leg entered fsm_move carrying the PREVIOUS spot state. That contradicts the invariant stated at the no_progress definition, State.moveTrack resets per committed spot, and could false-trip that watchdog on arrival. It now clears the same five: moveTrack, rearmStepback, marchPending, emptySince alongside keenedSpot. The mis-indented keenedSpot line, a leftover from whatever patch created the gap, is straightened too. THIS IS BEHAVIOURALLY FREE AND HERE IS THE PROOF: the block is MEASURED DORMANT. pick=stack occurs 0 times in 45 logs on a boundary-safe count, and stackWin and aggroAt, which are written ONLY inside this block, appear 0 times in any log, so the path has never executed. An earlier count of pick=mid and pick=top was MY OWN grep artifact: the pattern matched inside dpick=, which is why the census is now anchored on the field separator. SEPARATE QUESTION, QUEUED, do not conflate with this fix: whether the v0.1.224 timed-aggro stack maneuver is REACHABLE AT ALL, since the gate is first.kind equals stack and the route planner has never returned one. This change only makes the block correct for the day it runs. Suite 844 of 844, luac clean, 208 format sites clean, exactly one proto changed. ACCEPTANCE: nothing to watch, the path does not execute.)') end
+if LOG then LOG:info('Tinker brain v0.1.410 (FOG TRACKER FLIP, build 2 of TINKER_FOG_TRACKER_DESIGN. The live vision tracker now stamps on the dormancy-type argument, the gate the v0.1.409 shadow validated over two games. Fogged enemies finally age: the probable disc grows at the Liquipedia move cap, confidence decays, and a ghost older than the age cap stops pricing risk instead of pinning a frozen full-confidence point forever. The shadow surface is kept one build as a self-check: the shadow risk fields must now equal the live ones on every row. Age cap stays at five seconds, the value the flip gate was measured at. REVERT, not tune, on a death walking into a freshly fogged enemy or on mid shoves collapsing to fresh-fog vetoes.)') end
 
 return callbacks

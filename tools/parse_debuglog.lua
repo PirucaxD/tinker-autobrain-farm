@@ -137,6 +137,7 @@ for i = 1, #arg do
     elseif a == "--stuck-report" then mode = "stuck_report"; mode_count = mode_count + 1
     elseif a == "--crash-report" then mode = "crash_report"; mode_count = mode_count + 1
     elseif a == "--mana-report" then mode = "mana_report"; mode_count = mode_count + 1
+    elseif a == "--fog-shadow" then mode = "fog_shadow"; mode_count = mode_count + 1
     elseif a:match("^%-%-fog%-recalc=") then opt_fog_recalc = a:match("^%-%-fog%-recalc=(.+)$")
     elseif a == "--with-takeover" then opt_with_takeover = true
     elseif a == "--help" or a == "-h" then usage(); os.exit(0)
@@ -3388,7 +3389,7 @@ elseif mode == "state_report" then
             w.only_pollers and "[POLLER-ONLY] " or "", table.concat(str, ", ")))
     end
     os.exit(0)
-elseif mode ~= "fog_report" and mode ~= "stuck_report" and mode ~= "crash_report" and mode ~= "mana_report" then   -- v0.1.353/v0.1.362/v0.1.383: fog_report, stuck_report and crash_report are handled in their own blocks at the end of the file, so the timeline fallback must not also fire for them
+elseif mode ~= "fog_report" and mode ~= "stuck_report" and mode ~= "crash_report" and mode ~= "mana_report" and mode ~= "fog_shadow" then   -- v0.1.353/v0.1.362/v0.1.383/v0.1.409: fog_report, stuck_report, crash_report and fog_shadow are handled in their own blocks at the end of the file, so the timeline fallback must not also fire for them
     -- timeline mode. v6.15.2 low: sort kv keys deterministically per-line
     -- so diff-tooling output is stable between runs.
     for i = 1, #events do
@@ -3452,14 +3453,18 @@ if mode == "fog_report" then
                     nils = nils + 1
                     by_name[nm].nil_n = by_name[nm].nil_n + 1
                 else
+                    -- v0.1.409 decoupled age_real from raw: a raw-numeric line can now carry
+                    -- age_real=nil, so guard before arithmetic; a nil age_real is excluded.
                     local a, dist = tonumber(areal), tonumber(d)
-                    if a <= age_cap then in_cap = in_cap + 1 else out_cap = out_cap + 1 end
-                    -- d < 0 means the probe could not read the hero origin (origin() nil at
-                    -- teardown). Distance is UNKNOWN, so it still counts as a read but must not
-                    -- be scored as a flip: we cannot claim it was inside RISK_RADIUS.
-                    if dist >= 0 and dist <= risk_radius then
-                        if a > age_cap then flips = flips + 1 end
-                        if a > fresh_s then gank_flips = gank_flips + 1 end
+                    if a then
+                        if a <= age_cap then in_cap = in_cap + 1 else out_cap = out_cap + 1 end
+                        -- d < 0 means the probe could not read the hero origin (origin() nil at
+                        -- teardown). Distance is UNKNOWN, so it still counts as a read but must not
+                        -- be scored as a flip: we cannot claim it was inside RISK_RADIUS.
+                        if dist >= 0 and dist <= risk_radius then
+                            if a > age_cap then flips = flips + 1 end
+                            if a > fresh_s then gank_flips = gank_flips + 1 end
+                        end
                     end
                 end
             end
@@ -3932,5 +3937,172 @@ elseif mode == "crash_report" then
     print("")
     print("REMINDER: a falling stamp COUNT is true by construction once the pick is a proximity")
     print("test, so it is not evidence. Read the unreachable share AND whether defends still fire.")
+    os.exit(0)
+
+elseif mode == "fog_shadow" then
+    -- --fog-shadow (v0.1.409, TINKER_FOG_TRACKER_DESIGN.md): reads the build-1 shadow riders.
+    -- Three sections per log:
+    --   RISK PAIRS: every line carrying prisk= AND prisk_sh= (same for crisk); counts of
+    --     rows, rows where |live - shadow| > 0.05, DISSOLVED verdicts (live >= 0.42 > shadow)
+    --     and NEW-VETO verdicts (live < 0.42 <= shadow), plus the per-side medians. 0.42 is
+    --     K.PATH_RISK_MAX and K.FARM_SAFE_RISK; camps also report the 0.34 RISK_HARD split.
+    --   GHOST AGES: the age_real distribution from fog_hero (n, p50, p90, max, share > 5s,
+    --     share > 8s) - the age_cap sweep material.
+    --   TRACKER HEALTH: max vsh, probes with fog > 0 and vsh == 0 (should go to ~0 after the
+    --     first fog episode; a large count means the stamp is not firing).
+    -- The flip gate (design section 5) reads DISSOLVED >= NEW-VETO pooled over the corpus.
+    -- The pattern literals below are extracted as source text by the --fog-shadow contract
+    -- describe in run_tests.lua and exercised against emitter-shaped fixtures (pair lines in
+    -- both field orders): an edit here that stops matching those shapes fails that block.
+    -- A line with only the live field counts as live-only (live present, shadow genuinely
+    -- absent), never inferred into a pair: side-producer prisk reaches no log line and
+    -- wave/refill picks carry crisk without a shadow BY DESIGN.
+    -- Pairing is ORDER-INDEPENDENT: the emitter walks the kv table with pairs() (Tinker.lua
+    -- tlog), so prisk_sh can print before prisk on a real line; each field gets its own
+    -- single-field match. "prisk=" cannot false-match inside "prisk_sh=" because an
+    -- underscore, not "=", follows prisk there (verified:
+    -- ("prisk_sh=0.77"):match("prisk=([%d%.]+)") == nil); same for crisk.
+    local p_live_pat = "prisk=([%d%.]+)"
+    local p_sh_pat   = "prisk_sh=([%d%.]+)"
+    local c_live_pat = "crisk=([%d%.]+)"
+    local c_sh_pat   = "crisk_sh=([%d%.]+)"
+    local age_pat   = "fog_hero raw=%S+ age_now=%S+ age_real=([%d%.]+)"
+    local vsh_pat   = "fog_probe .-fog=(%d+).-vsh=(%d+)"
+    local THRESH, RISK_HARD = 0.42, 0.34   -- K.PATH_RISK_MAX = K.FARM_SAFE_RISK; camp-selection veto
+    local function pctl(t, q)              -- t sorted ascending, q a fraction; guard n == 0
+        if #t == 0 then return 0 end
+        return t[math.max(1, math.min(#t, math.ceil(q * #t)))]
+    end
+    local function build_of(p)
+        local f = io.open(p, "r"); if not f then return "?" end
+        for line in f:lines() do
+            local v = line:match("Tinker brain (v[%d%.]+)")
+            if v then f:close(); return v end
+        end
+        f:close(); return "NO BANNER"
+    end
+    local function split_counts(rows, bar)   -- rows = { {live, shadow}, ... }
+        local div, dis, nv = 0, 0, 0
+        for _, r in ipairs(rows) do
+            if math.abs(r[1] - r[2]) > 0.05 then div = div + 1 end
+            if r[1] >= bar and r[2] < bar then dis = dis + 1
+            elseif r[1] < bar and r[2] >= bar then nv = nv + 1 end
+        end
+        return div, dis, nv
+    end
+    local function medians(rows)
+        local lv, sh = {}, {}
+        for _, r in ipairs(rows) do lv[#lv + 1] = r[1]; sh[#sh + 1] = r[2] end
+        table.sort(lv); table.sort(sh)
+        return pctl(lv, 0.5), pctl(sh, 0.5)
+    end
+    local function print_pairs(label, rows, unpaired, unpaired_note)
+        print(string.format("   RISK PAIRS %-18s %d pairs, %d live-only%s", label, #rows, unpaired, unpaired_note))
+        if #rows > 0 then
+            local div, dis, nv = split_counts(rows, THRESH)
+            local ml, ms = medians(rows)
+            print(string.format("     diverged >0.05: %d   DISSOLVED: %d   NEW-VETO: %d   median live=%.2f shadow=%.2f",
+                div, dis, nv, ml, ms))
+        end
+    end
+
+    print(string.format("--- fog-shadow report --- build-1 riders; verdict bar %.2f (PATH_RISK_MAX = FARM_SAFE_RISK), camps also split at RISK_HARD %.2f",
+        THRESH, RISK_HARD))
+    print("    DISSOLVED = live >= bar > shadow (a ghost-priced veto that real ages would lift)")
+    print("    NEW-VETO  = live < bar <= shadow (a veto only real ages would raise)")
+    print("    NOTE on v0.1.410+ logs (the FLIP): live == shadow is the CONTRACT, so any nonzero")
+    print("    diverged/DISSOLVED/NEW-VETO count is a SELF-CHECK FAILURE (revert-grade), not calibration data.")
+    print("")
+    local corp = { prows = {}, crows = {}, ages = {} }
+    for _, p in ipairs(paths) do
+        local evs = load_log(p)   -- the shared reader: takeover excision included
+        local prows, crows, ages = {}, {}, {}
+        local unpair_p, unpair_c = 0, 0
+        local probes, vsh_max, fog_nosh = 0, 0, 0
+        for _, e in ipairs(evs) do
+            local raw = e.raw or ""
+            if not raw:find("brain v", 1, true) then   -- every hero's banner quotes its own tokens
+                local a, b = raw:match(p_live_pat), raw:match(p_sh_pat)
+                if a and b then prows[#prows + 1] = { tonumber(a), tonumber(b) }
+                elseif a then unpair_p = unpair_p + 1 end
+                local ca, cb = raw:match(c_live_pat), raw:match(c_sh_pat)
+                if ca and cb then crows[#crows + 1] = { tonumber(ca), tonumber(cb) }
+                elseif ca then unpair_c = unpair_c + 1 end
+                local ar = raw:match(age_pat)
+                if ar then ages[#ages + 1] = tonumber(ar) end
+                local fog, vsh = raw:match(vsh_pat)
+                if fog then
+                    probes = probes + 1
+                    local f, v = tonumber(fog), tonumber(vsh)
+                    if v > vsh_max then vsh_max = v end
+                    if f > 0 and v == 0 then fog_nosh = fog_nosh + 1 end
+                end
+            end
+        end
+        table.sort(ages)
+        for _, r in ipairs(prows) do corp.prows[#corp.prows + 1] = r end
+        for _, r in ipairs(crows) do corp.crows[#corp.crows + 1] = r end
+        for _, a2 in ipairs(ages) do corp.ages[#corp.ages + 1] = a2 end
+
+        local bld = build_of(p)
+        local bv = tonumber(bld:match("^v0%.1%.(%d+)") or "")
+        print(string.format("== %-26s %s", p:match("[^/\\]+$"), bld))
+        -- probes counts only vsh-carrying fog_probe lines, so it is the instrument detector:
+        -- a pre-.409 log has fog_probe without vsh= and reads 0 here even with heavy fog.
+        if probes == 0 and #prows == 0 and #crows == 0 then
+            if bv and bv < 409 then
+                print(string.format("   SHADOW: UNKNOWN - build v0.1.%d predates the v0.1.409 shadow riders.", bv))
+                print("   The zeros below are a missing instrument, NOT measurements.")
+            elseif bld == "NO BANNER" then
+                print("   SHADOW: UNKNOWN - no Tinker banner in this input (absence is NOT zero).")
+                print("   A hand-SPLIT log cuts the banner off: re-run on the RAW file.")
+            end
+        end
+        print_pairs("(corridor prisk):", prows, unpair_p, "  (live-only should be 0 on a .409 log: mid is the only prisk emitter)")
+        print_pairs("(camp crisk):", crows, unpair_c, "  (live-only EXPECTED: wave/refill picks carry no shadow by design)")
+        if #crows > 0 then
+            local _, dis34, nv34 = split_counts(crows, RISK_HARD)
+            print(string.format("     at RISK_HARD %.2f (camp-selection veto): DISSOLVED %d   NEW-VETO %d", RISK_HARD, dis34, nv34))
+        end
+        local n = #ages
+        print(string.format("   GHOST AGES (fog_hero age_real): n=%d%s", n,
+            n == 0 and "  (numeric age_real only; never-seen prints nil and stays excluded)" or ""))
+        if n > 0 then
+            local over5, over8 = 0, 0
+            for _, a2 in ipairs(ages) do
+                if a2 > 5 then over5 = over5 + 1 end
+                if a2 > 8 then over8 = over8 + 1 end
+            end
+            print(string.format("     p50=%.1f p90=%.1f max=%.1f   share>5s %d/%d (%.0f%%)   share>8s %d/%d (%.0f%%)",
+                pctl(ages, 0.5), pctl(ages, 0.9), ages[n], over5, n, 100 * over5 / n, over8, n, 100 * over8 / n))
+        end
+        if probes > 0 then
+            print(string.format("   TRACKER HEALTH: %d probes, max vsh=%d, probes with fog>0 and vsh=0: %d  (a large count = the stamp is not firing)",
+                probes, vsh_max, fog_nosh))
+        else
+            print("   TRACKER HEALTH: no vsh-carrying fog_probe lines in this log")
+        end
+        print("")
+    end
+    if #paths > 1 then
+        table.sort(corp.ages)
+        print(string.format("--- CORPUS (%d logs, pooled) ---", #paths))
+        local _, dis, nv = split_counts(corp.prows, THRESH)
+        local _, cdis, cnv = split_counts(corp.crows, THRESH)
+        print(string.format("   corridor pairs=%d DISSOLVED=%d NEW-VETO=%d   camp pairs=%d DISSOLVED=%d NEW-VETO=%d",
+            #corp.prows, dis, nv, #corp.crows, cdis, cnv))
+        if #corp.ages > 0 then
+            print(string.format("   ghost ages pooled: n=%d p50=%.1f p90=%.1f max=%.1f",
+                #corp.ages, pctl(corp.ages, 0.5), pctl(corp.ages, 0.9), corp.ages[#corp.ages]))
+        end
+        if #corp.prows == 0 then
+            print(string.format("   FLIP GATE (design section 5): UNKNOWN - no corridor pairs in the corpus, nothing to gate on"))
+        else
+            print(string.format("   FLIP GATE (design section 5, corridor pairs at %.2f): DISSOLVED %d %s NEW-VETO %d -> %s",
+                THRESH, dis, (dis >= nv) and ">=" or "<", nv,
+                (dis >= nv) and "gate 2 of 3 PASSES (gates 1 and 3 are read by hand)"
+                             or "gate 2 FAILS - stay in shadow and re-read"))
+        end
+    end
     os.exit(0)
 end

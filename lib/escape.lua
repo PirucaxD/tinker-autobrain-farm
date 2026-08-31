@@ -124,7 +124,12 @@ if not _vstore then
                 wired = setmetatable({}, { __mode = "k" }) }
     if _vreg then _vreg["__LIB_VISION_STORE"] = _vstore end
 end
+-- v0.1.409 build 1 (TINKER_FOG_TRACKER_DESIGN.md): the SHADOW stamp table. Defaulted ON
+-- ATTACH per the FUTURE-STORE-FIELDS rule above, never only in the create branch, so an
+-- old-shape store surviving a mid-session lib upgrade gains the field instead of nil-crashing.
+_vstore.last_seen_sh = _vstore.last_seen_sh or {}
 local last_seen = _vstore.last_seen     -- entity -> monotonic seconds at which it went dormant
+local last_seen_sh = _vstore.last_seen_sh   -- entity -> clock() at the dtype-1 (ENTER dormancy) callback
 local types = _vstore.types             -- probe counters: the callback surface is UNPROVEN
 
 ---Monotonic seconds. `GlobalVars.GetCurTime` is what the FogSnapshot note documents as the
@@ -137,13 +142,16 @@ local function clock()
 end
 
 ---OnSetDormant handler. The signature is `(npc, type)` where `type` is an
----`Enum.DormancyType` the docs describe only as "the type of change" - they do NOT say
----which value means ENTERING dormancy, nor whether the callback fires for enemy heroes at
----all. So `type` is RECORDED but never trusted for logic; the documented
----`Entity.IsDormant` decides. This codebase has been burned three times by assuming API
----semantics (NPC.GetAttackDamage, Ability.GetCooldownTimeRemaining,
----NPC.GetModifierRemaining), so the recorded values teach us the enum from a real log
----instead of a guess.
+---`Enum.DormancyType` the docs describe only as "the type of change". The enum was
+---LEARNED FROM DATA, not guessed: g401 diffed the recorded type counters against the
+---probe's fog census over 73 windows with zero contradictions - dtype 1 = ENTERING
+---dormancy, 0 = LEAVING. As of v0.1.410 the dtype IS the trusted stamp gate;
+---`Entity.IsDormant` is probed here ONLY for the types diagnostic, because g401 also
+---proved it reads false INSIDE this callback (the engine applies the flag after it), which
+---is why the original if-dorm gate stamped nothing across 46 logs. This codebase has been
+---burned three times by assuming API semantics (NPC.GetAttackDamage,
+---Ability.GetCooldownTimeRemaining, NPC.GetModifierRemaining); the recorded-then-derive
+---approach here is the counterexample that worked.
 ---@param npc userdata
 ---@param dtype any
 function Vision.OnSetDormant_handler(npc, dtype)
@@ -162,8 +170,18 @@ function Vision.OnSetDormant_handler(npc, dtype)
     if Entity and Entity.IsDormant then dorm = Entity.IsDormant(npc) end
     local k = tostring(dtype) .. "/" .. tostring(dorm)
     types[k] = (types[k] or 0) + 1
-    if dorm then
-        last_seen[npc] = clock()        -- the moment it left vision IS the last-seen time
+    -- v0.1.410 BUILD 2, THE FLIP (TINKER_FOG_TRACKER_DESIGN.md section 6): the LIVE stamp now
+    -- rides the dtype, exactly like the shadow that validated it (g402+g403: tracker stamped
+    -- both games, DISSOLVED 1 >= NEW-VETO 0, zero fresh-fog vetoes). dtype 1 = ENTERING
+    -- dormancy, derived from g401 data with zero contradictions in 73 windows. The old
+    -- if-dorm gate is DELETED: g401 proved Entity.IsDormant reads false inside this callback
+    -- (the engine applies the flag after it), so it stamped nothing across 46 logs. dorm stays
+    -- probed above ONLY for the types diagnostic, which is the instrument that would reveal an
+    -- engine patch changing either surface. The shadow table keeps stamping so the build-1
+    -- riders become a live self-check: prisk_sh must now EQUAL prisk on every logged pair.
+    if tostring(dtype) == "1" then
+        last_seen_sh[npc] = clock()
+        last_seen[npc] = clock()
     end
 end
 
@@ -190,13 +208,32 @@ function Vision.LastSeen(e)
     return last_seen[e]
 end
 
----@return table { tracked = number, events = number, types = table }
+---SHADOW twin of Age (v0.1.409 build 1): same contract, reading the dtype-gated shadow
+---table. Consumed ONLY by Tinker's shadow-risk riders; Lina/Sniper never call it. KEPT
+---through the v0.1.410 flip's validation as a live self-check (both tables now stamp on
+---the same gate, so shadow must equal live on every logged pair); deletion candidate
+---after v0.1.410 validates.
+---@param e userdata
+---@return number|nil 0 when visible now; seconds since the shadow stamp; nil when never seen
+function Vision.AgeShadow(e)
+    if not e then return nil end
+    if Entity and Entity.IsDormant and not Entity.IsDormant(e) then return 0 end
+    local t = last_seen_sh[e]
+    if not t then return nil end
+    local a = clock() - t
+    return (a < 0) and 0 or a
+end
+
+---@return table { tracked = number, tracked_sh = number, events = number, types = table }
 ---`events` is the field that proves whether OnSetDormant fires at all. If it stays 0 in a
----real game, this whole facility is inert and every consumer is unchanged.
+---real game, this whole facility is inert and every consumer is unchanged. tracked_sh
+---(v0.1.409) is the SHADOW count: the build-1 health check that must climb with fog activity.
 function Vision.Stats()
     local n = 0
     for _ in pairs(last_seen) do n = n + 1 end
-    return { tracked = n, events = _vstore.events, types = types }
+    local nsh = 0
+    for _ in pairs(last_seen_sh) do nsh = nsh + 1 end
+    return { tracked = n, tracked_sh = nsh, events = _vstore.events, types = types }
 end
 
 ---Idempotent; mirrors lib/damage.lua's Init contract.
@@ -881,6 +918,32 @@ function Escape.FogSnapshot(me, opts)
         end
     end
     return { t = t, heroes = heroes }
+end
+
+---SHADOW-AGED copy of a FogSnapshot (v0.1.409 build 1, TINKER_FOG_TRACKER_DESIGN.md):
+---same rows, same positions, ages re-read from the dtype-gated shadow tracker with the
+---same PROBE_MAX_AGE_S clamp as the live path above. Defined HERE, below the Vision
+---section banner, so the clamp constant is shared instead of duplicated. probable_radius
+---is deliberately NOT carried: FogProximityRisk recomputes radius from age (its own doc
+---says so) and nothing else consumes the shadow copy. The input snapshot is never
+---mutated. KEPT through the v0.1.410 flip's validation as a live self-check alongside
+---AgeShadow; deletion candidate after v0.1.410 validates.
+---@param snap table  a FogSnapshot return value
+---@return table      { t, heroes = { {entity, pos, age, visible} } }
+function Vision.ShadowAges(snap)
+    if not snap or not snap.heroes then return snap end
+    local heroes = {}
+    for i = 1, #snap.heroes do
+        local h = snap.heroes[i]
+        local age = 0
+        if not h.visible then
+            age = Vision.AgeShadow(h.entity) or 0
+            if age < 0 then age = 0 end
+            if age > PROBE_MAX_AGE_S then age = PROBE_MAX_AGE_S end
+        end
+        heroes[i] = { entity = h.entity, pos = h.pos, age = age, visible = h.visible }
+    end
+    return { t = snap.t, heroes = heroes }
 end
 
 ---Enumerate enemy heroes whose CURRENT possible position could be within

@@ -3799,11 +3799,77 @@ describe("fog probe <-> analyzer format contract (v0.1.353)", function()
         -- v0.1.354 added vtrack/vev/vtypes AFTER off=, so the format takes 7 args now.
         -- This test failed the moment those fields were added, which is exactly its job:
         -- the probe and its parser live in different files with nothing else coupling them.
-        local line = string.format(probe_fmt, 100.0, -103.4, 1, 2, 3, 4, "1:5")
+        -- v0.1.409 added vsh= (8th arg). This test failing on the field add is exactly its job.
+        local line = string.format(probe_fmt, 100.0, -103.4, 1, 2, 3, 4, "1:5", 2)
         -- the analyzer pattern captures t FIRST (added when the pregame outlier was excluded),
         -- so off is the SECOND capture. This test caught that change the moment it was made.
         local _t, off = line:match(probe_pat)
         assert_eq(off, "-103.4")
+    end)
+end)
+
+describe("tools/parse_debuglog --fog-shadow contracts (v0.1.409)", function()
+    -- The mode's patterns EXTRACTED from the analyzer source, never duplicated literals
+    -- (same idiom as the B14 fog-probe contract: read both real files and prove they
+    -- agree). An analyzer-side pattern edit that stops matching these emitter-shaped
+    -- fixtures fails here; a duplicated literal could not see such an edit.
+    local parser do
+        local f = io.open("tools/parse_debuglog.lua", "r")
+        if f then parser = f:read("*a"); f:close() end
+    end
+    local function pat_of(name)
+        return parser and parser:match('local%s+' .. name .. '%s*=%s*"([^"]+)"') or nil
+    end
+    local p_live, p_sh = pat_of("p_live_pat"), pat_of("p_sh_pat")
+    local c_live, c_sh = pat_of("c_live_pat"), pat_of("c_sh_pat")
+    local age_pat, vsh_pat = pat_of("age_pat"), pat_of("vsh_pat")
+
+    it("all six mode patterns extract from parse_debuglog.lua (renamed = contract dead)", function()
+        assert_true(parser ~= nil, "cannot open tools/parse_debuglog.lua (run from the repo root)")
+        for nm, v in pairs({ p_live_pat = p_live, p_sh_pat = p_sh, c_live_pat = c_live,
+                             c_sh_pat = c_sh, age_pat = age_pat, vsh_pat = vsh_pat }) do
+            assert_true(v ~= nil, "pattern " .. nm .. " not found in parse_debuglog.lua")
+        end
+    end)
+
+    it("a farm row with both prisk fields pairs in EITHER field order", function()
+        -- the emitter walks the kv table with pairs(), so a real line can print the
+        -- shadow rider first; the shadow-first fixture also pins that "prisk=" does
+        -- not false-match inside "prisk_sh=" (it would read 0.00 here, not 0.43)
+        for _, ln in ipairs({
+            "[INFO] [Tinker] farm | gpm=400 | prisk=0.43 | t=524.3 | prisk_sh=0.00 | cap=10",
+            "[INFO] [Tinker] farm | gpm=400 | prisk_sh=0.00 | t=524.3 | prisk=0.43 | cap=10",
+        }) do
+            assert_eq(ln:match(p_live), "0.43"); assert_eq(ln:match(p_sh), "0.00")
+        end
+    end)
+
+    it("a camp row with both crisk fields pairs in EITHER field order", function()
+        for _, ln in ipairs({
+            "[INFO] [Tinker] farm | cval=170 | crisk=0.26 | crisk_sh=0.91 | t=546.7",
+            "[INFO] [Tinker] farm | cval=170 | crisk_sh=0.91 | crisk=0.26 | t=546.7",
+        }) do
+            assert_eq(ln:match(c_live), "0.26"); assert_eq(ln:match(c_sh), "0.91")
+        end
+    end)
+
+    it("a live-only row reads live but yields no shadow (counts live-only, never a pair)", function()
+        local ln = "[INFO] [Tinker] farm | cval=170 | crisk=0.26 | t=546.7"
+        assert_eq(ln:match(c_live), "0.26"); assert_true(ln:match(c_sh) == nil)
+    end)
+
+    it("a numeric age_real parses; the nil form does not (never-seen stays excluded)", function()
+        assert_eq(("fog_hero raw=nil age_now=nil age_real=7.4 d=1200 name=x"):match(age_pat), "7.4")
+        assert_true(("fog_hero raw=nil age_now=nil age_real=nil d=1200 name=x"):match(age_pat) == nil)
+    end)
+
+    it("the vsh health read captures fog count and shadow count together", function()
+        local tinker = io.open("Tinker/Tinker.lua"):read("a")
+        local probe_fmt = tinker:match('"(fog_probe t=[^"]+)"')
+        assert_true(probe_fmt ~= nil and probe_fmt:find("vsh=%%d") ~= nil, "the emitter must carry vsh=")
+        local ln = string.format(probe_fmt, 10.0, -1.0, 1, 3, 0, 40, "0/false:2", 3)
+        local fog, vsh = ln:match(vsh_pat)
+        assert_eq(fog, "3"); assert_eq(vsh, "3")
     end)
 end)
 
@@ -3863,16 +3929,20 @@ describe("lib/escape.Vision -- shared last-seen tracker (v0.1.354; absorbed at v
         assert_true(Vision.Age(CREEP) == nil, "a creep must never be tracked")
     end)
 
-    it("the handler follows Entity.IsDormant, NOT the undocumented type enum", function()
-        -- OnSetDormant's `type` is an Enum.DormancyType the docs describe only as "the type
-        -- of change"; nothing states which value means entering dormancy. A nonsense type
-        -- must still stamp when IsDormant says dormant.
-        local d = { [HERO] = true }
+    it("the dtype is the gate now: an unknown value is recorded but never trusted", function()
+        -- v0.1.410 flip: the dtype IS the trusted gate (g401: 73 windows, zero
+        -- contradictions). The handler-time Entity.IsDormant read stamps NOTHING any more -
+        -- g401 proved it reads false inside the callback - so an unknown dtype must not
+        -- stamp even when the probe read says dormant. The probe still records the value.
+        local U999 = { id = "unknown_dtype" }
+        local d = { [U999] = true }
         with_engine(d); at(50)
-        Vision.OnSetDormant_handler(HERO, 999)
+        Vision.OnSetDormant_handler(U999, 999)
         at(55)
-        local a = Vision.Age(HERO)
-        assert_true(a ~= nil and math.abs(a - 5.0) < 1e-6, "IsDormant decides, not type; got " .. tostring(a))
+        assert_true(Vision.Age(U999) == nil,
+            "an unknown dtype must never stamp; got " .. tostring(Vision.Age(U999)))
+        assert_true(Vision.Stats().types["999/true"] ~= nil,
+            "the probe must still record the 999/true key")
     end)
 
     it("Wire chains onto an existing handler and is idempotent per table", function()
@@ -3928,6 +3998,153 @@ describe("lib/escape.Vision -- shared last-seen tracker (v0.1.354; absorbed at v
     -- restore every global this block overrode, for the suites that follow
     NPC.IsHero, Entity.IsDormant = _vsav.ih, _vsav.dm
     GlobalVars.GetCurTime = _vsav.ct or function() return 0 end
+end)
+
+describe("lib/escape.Vision -- SHADOW tracker (v0.1.409 build 1, kept as self-check through the v0.1.410 build 2 flip, TINKER_FOG_TRACKER_DESIGN)", function()
+    local Vision = require("lib.escape").Vision
+    local function at(t) GlobalVars.GetCurTime = function() return t end end
+    local SH1, SH2, SH3, SH4, SHCREEP = { id = "sh1" }, { id = "sh2" }, { id = "sh3" }, { id = "sh4" }, { id = "shcreep" }
+    local _sav = { ih = NPC.IsHero, dm = Entity.IsDormant, ct = GlobalVars.GetCurTime }
+    local dormant = {}
+    local function with_engine()
+        NPC.IsHero = function(e) return e ~= SHCREEP end
+        Entity.IsDormant = function(e) return dormant[e] == true end
+    end
+
+    it("the REAL engine shape now stamps BOTH trackers (the v0.1.410 flip)", function()
+        -- g401 proved the callback fires BEFORE the engine applies the dormancy flag
+        -- (vtypes reads 0/false and 1/false, never nil), so IsDormant is false HERE.
+        -- Build 1 stamped only the shadow off the dtype; the flip rides the SAME gate for
+        -- the live table, so a fogged enemy finally gets a real live age. This is the pin
+        -- for the defect the whole arc existed to fix.
+        with_engine(); at(100)
+        Vision.OnSetDormant_handler(SH1, 1)
+        dormant[SH1] = true          -- the engine applies the flag AFTER the callback
+        at(107)
+        local a = Vision.Age(SH1)
+        assert_true(a ~= nil and math.abs(a - 7.0) < 1e-6, "live age expected 7.0, got " .. tostring(a))
+        local ash = Vision.AgeShadow(SH1)
+        assert_true(ash ~= nil and math.abs(ash - 7.0) < 1e-6, "shadow age expected 7.0, got " .. tostring(ash))
+    end)
+
+    it("dtype 0 (LEAVING dormancy) does not stamp the shadow", function()
+        with_engine(); at(100)
+        Vision.OnSetDormant_handler(SH2, 0)
+        dormant[SH2] = true
+        at(105)
+        assert_true(Vision.AgeShadow(SH2) == nil, "dtype 0 must not stamp")
+    end)
+
+    it("a stringable dtype stamps too (tostring compare), live and shadow alike", function()
+        with_engine(); at(200)
+        Vision.OnSetDormant_handler(SH3, "1")
+        dormant[SH3] = true
+        at(203)
+        local a = Vision.AgeShadow(SH3)
+        assert_true(a ~= nil and math.abs(a - 3.0) < 1e-6, "string dtype expected 3.0, got " .. tostring(a))
+        local al = Vision.Age(SH3)
+        assert_true(al ~= nil and math.abs(al - 3.0) < 1e-6,
+            "the flipped live gate must stamp on a string dtype too, got " .. tostring(al))
+    end)
+
+    it("AgeShadow is 0 for a hero visible NOW, even if stamped earlier", function()
+        with_engine(); at(300)
+        Vision.OnSetDormant_handler(SH4, 1)
+        dormant[SH4] = false         -- back in vision
+        at(310)
+        assert_eq(Vision.AgeShadow(SH4), 0)
+    end)
+
+    it("a creep is never shadow-tracked", function()
+        with_engine(); at(400)
+        Vision.OnSetDormant_handler(SHCREEP, 1)
+        dormant[SHCREEP] = true
+        assert_true(Vision.AgeShadow(SHCREEP) == nil, "creeps must never be tracked")
+    end)
+
+    it("Stats reports the shadow count", function()
+        local s = Vision.Stats()
+        assert_true(type(s.tracked_sh) == "number", "tracked_sh missing from Stats")
+        assert_true(s.tracked_sh >= 3, "SH1, SH3, SH4 were stamped above; got " .. tostring(s.tracked_sh))
+    end)
+
+    NPC.IsHero = _sav.ih; Entity.IsDormant = _sav.dm
+    GlobalVars.GetCurTime = _sav.ct or function() return 0 end
+end)
+
+describe("lib/escape.Vision -- shadow store migrates an OLD-shape store (FUTURE-FIELDS rule)", function()
+    -- A mid-session lib upgrade attaches to a store created by a PRE-v0.1.409 escape.lua,
+    -- which has no last_seen_sh. The attach-time default must add it, never crash.
+    local _sav = { ih = NPC.IsHero, dm = Entity.IsDormant, ct = GlobalVars.GetCurTime }
+    it("attach adds last_seen_sh to a store that lacks it", function()
+        local store = package.loaded["__LIB_VISION_STORE"]
+        assert_true(store ~= nil, "the store must exist after the requires above")
+        store.last_seen_sh = nil                    -- simulate the old shape
+        package.loaded["lib.escape"] = nil          -- force the chunk to re-run and re-attach
+        local V2 = require("lib.escape").Vision
+        assert_true(type(package.loaded["__LIB_VISION_STORE"].last_seen_sh) == "table",
+            "attach must default last_seen_sh")
+        local MH = { id = "mig" }
+        local dormant = {}
+        NPC.IsHero = function() return true end
+        Entity.IsDormant = function(e) return dormant[e] == true end
+        GlobalVars.GetCurTime = function() return 500 end
+        V2.OnSetDormant_handler(MH, 1)
+        dormant[MH] = true
+        GlobalVars.GetCurTime = function() return 504 end
+        local a = V2.AgeShadow(MH)
+        assert_true(a ~= nil and math.abs(a - 4.0) < 1e-6, "re-attached module must stamp; got " .. tostring(a))
+    end)
+    NPC.IsHero = _sav.ih; Entity.IsDormant = _sav.dm
+    GlobalVars.GetCurTime = _sav.ct or function() return 0 end
+end)
+
+describe("lib/escape.Vision.ShadowAges -- shadow-aged snapshot copy (v0.1.409 build 1)", function()
+    local Vision = require("lib.escape").Vision
+    local _sav = { ih = NPC.IsHero, dm = Entity.IsDormant, ct = GlobalVars.GetCurTime }
+    local dormant = {}
+    NPC.IsHero = function() return true end
+    Entity.IsDormant = function(e) return dormant[e] == true end
+    local function at(t) GlobalVars.GetCurTime = function() return t end end
+    local FA, FB = { id = "fa" }, { id = "fb" }
+
+    it("re-ages fogged rows from the shadow tracker; visible rows stay age 0; input untouched", function()
+        at(100); Vision.OnSetDormant_handler(FB, 1); dormant[FB] = true
+        at(104)
+        local snap = { t = 104, heroes = {
+            { entity = FA, pos = { x = 1, y = 2 }, age = 0, visible = true },
+            { entity = FB, pos = { x = 3, y = 4 }, age = 0, visible = false, probable_radius = 0 },
+        } }
+        local sh = Vision.ShadowAges(snap)
+        assert_eq(sh.t, 104)
+        assert_eq(sh.heroes[1].age, 0)
+        assert_true(math.abs(sh.heroes[2].age - 4.0) < 1e-6, "fogged row expected 4.0, got " .. tostring(sh.heroes[2].age))
+        assert_eq(sh.heroes[2].pos.x, 3)
+        assert_eq(snap.heroes[2].age, 0, "the INPUT snapshot must never be mutated")
+    end)
+
+    it("clamps a stale shadow age exactly like FogSnapshot clamps live ages (30s)", function()
+        at(100 + 200)   -- FB stamped at 100 above; 200s later
+        local snap = { t = 300, heroes = { { entity = FB, pos = { x = 0, y = 0 }, age = 0, visible = false } } }
+        local sh = Vision.ShadowAges(snap)
+        assert_eq(sh.heroes[1].age, 30)
+    end)
+
+    it("a never-stamped fogged hero reads age 0 (the nil safety valve, same as live)", function()
+        local NEVER = { id = "fnever" }
+        dormant[NEVER] = true
+        local snap = { t = 1, heroes = { { entity = NEVER, pos = { x = 0, y = 0 }, age = 0, visible = false } } }
+        assert_eq(Vision.ShadowAges(snap).heroes[1].age, 0)
+    end)
+
+    it("nil and hero-less snapshots pass through", function()
+        assert_true(Vision.ShadowAges(nil) == nil)
+        local empty = { t = 5 }
+        assert_true(Vision.ShadowAges(empty) == empty)
+    end)
+
+    NPC.IsHero = _sav.ih; Entity.IsDormant = _sav.dm
+    GlobalVars.GetCurTime = _sav.ct or function() return 0 end
 end)
 
 describe("lib/escape -- FogSnapshot consumes the Vision section (v0.1.354)", function()
