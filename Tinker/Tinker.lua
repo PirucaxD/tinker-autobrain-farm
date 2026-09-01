@@ -976,10 +976,26 @@ do
                     -- ending) DURING our 1.2-2.93s channel is a ready breaker for it.
                     -- Only a cd longer than the horizon clears; level observations clear
                     -- via LevelCleared (fresh ability-level-0, or the aged ult fact).
+                    -- v0.1.412: ZERO THE STALE GHOST'S DISC, keep its raw-distance catch (the
+                    -- v0.1.410 flip armed this term). Pre-flip, Vision never stamped, so h.age
+                    -- was 0 and probable_radius 0 on EVERY fogged row: the gate fired on raw
+                    -- d <= range + margin for ALL fogged disablers, whatever their real fog
+                    -- time. Post-flip a long-fogged disabler carried a disc of up to 30s x
+                    -- FOG_MS = 16500u, and range + 500 + that covered the whole map: g405
+                    -- watched a Bane fogged 42-66s at 10-17k units veto EVERY keen cast site
+                    -- (a 26.7s walk) and a fogged Tiny across the map defer rearms. The fix
+                    -- keeps the fresh-fog disc (<= 5s x 550 = 2750u) and zeroes the disc for
+                    -- ghosts past FOG_AGE_CAP, WITHOUT dropping them: a stale lurker whose
+                    -- last-known position is inside raw reach (trees next to the stand) still
+                    -- gates, which is exactly the pre-flip catch. (A first cut dropped stale
+                    -- ghosts outright; the adversarial review caught that it removed the
+                    -- near-lurker catch no other layer covers - FogProximityRisk drops them,
+                    -- ReachableFog wants age <= 1.5s, lane_unsafe counts visible only.)
                     if not ChannelGate.LevelCleared({ ability = b.ability, ult = b.ult },
                                                     { abil = obs.abil[b.ability], hero = obs.hero }, now())
                        and not (cd and cd > K.CHANNEL_GATE_HORIZON)
-                       and d <= b.range + K.CHANNEL_GATE_MARGIN + (h.probable_radius or 0)
+                       and d <= b.range + K.CHANNEL_GATE_MARGIN
+                               + (((h.age or 0) <= K.FOG_AGE_CAP) and (h.probable_radius or 0) or 0)
                        and ChannelGate.ReadyAt(State.castStamps or {}, name, b.ability, now() + K.CHANNEL_GATE_HORIZON) then
                         return name, h.pos    -- a plausibly-READY breaker is in reach: gate the channel (pos: v0.1.267 step-back aiming)
                     end
@@ -1226,7 +1242,10 @@ local function lane_unsafe(pos, opts)
             -- table allocation on the gate path is the exact class of edit that made v0.1.357
             -- unshippable. The widen site passes the SNAPSHOT in this slot and it is resolved here.
             if type(ne) == "table" then
-                ne, nh = Escape.NearestEnemyEdge(ne, p, { fog_ms = K.FOG_MS }), #(ne.heroes or {})
+                -- v0.1.412: age_cap added (the v0.1.410 flip armed the shrink term; ne= p50
+                -- collapsed ~1400 -> 0 in g404/g405 as stale ghosts zeroed the edge). Log-only
+                -- field, but it is THE commit-risk payload measurement, so it stays honest.
+                ne, nh = Escape.NearestEnemyEdge(ne, p, { fog_ms = K.FOG_MS, age_cap = K.FOG_AGE_CAP }), #(ne.heroes or {})
             end
             logline(string.format(
                 -- ap/wmax are %g, NOT the design's %d: string.format runs HERE, at the call site,
@@ -2282,25 +2301,57 @@ local function keen_to_anchor(stand, include_creeps)
     -- v0.1.397 THE AFFORDABILITY GATE (g360 keen-audit finding #10, re-armed by the two g391
     -- castless statues at t=353/t=386: keened in at raw 214, post-jump ~139, below March cost,
     -- stood ~15s casting NOTHING). A commit that cannot fund its March on arrival is unaffordable
-    -- BEFORE it leaves. Non-raid only; TRANSIENT refusal (both callers' whitelists retry it next
+    -- BEFORE it leaves. Wave arm (raids get the full-chain arm below, v0.1.411); TRANSIENT refusal (both callers' whitelists retry it next
     -- tick without latching keenedSpot into a walk); and it defers ONLY when the Bottle can close
     -- the gap - stamping keenNoFund lets bottle_tick drink ABOVE its 200 floor (the v0.1.386
     -- machinery, keen flavour), so raw rises ~60/charge and the keen fires 1-2 ticks later funded.
     -- If no charges can close it, TODAY'S behaviour stands (no new veto, no regression path).
     -- Precheck over 15 logs: fires 0.67/game, 7 of 10 are the statue class, 3 of 10 cost one tick
     -- plus a drink on commits that were fine anyway.
-    if not include_creeps then
+    -- v0.1.411 RAID ARM (TINKER_RAID_READINESS_DESIGN.md; g403 operator-watched: 5 raid-era
+    -- keens with ZERO W casts in 176s while keen_defer fired 0 times - the gate above exempted
+    -- raids entirely via `if not include_creeps`). A raid keen now prices the FULL CHAIN TO
+    -- FIRST CAST, not just March:
+    --   March ready:  short = mc - (mana() - kc)                        (parity with the wave arm)
+    --   March on cd:  short = max(reserve + rc, rc + mc) - (mana() - kc)
+    -- The max() of the TWO bars is load-bearing (the v0.1.384 ruler-mismatch class: a predicate
+    -- that agrees with only ONE downstream bar leaves a band where the hero neither bails nor
+    -- casts). g403 statued against each bar separately: t=643.9 post-jump 230 vs try_rearm's
+    -- reserve+rc bar 300 (the plain March check would have PASSED it, 230 >= 160); t=685.4
+    -- post-jump 309 passed the 300 bar but rearm spends 150 leaving 159 < March 160, one mana
+    -- short of rc+mc. reserve reads the SAME source try_rearm spends against
+    -- (State.menu.escapeMana:Get()), so the two rulers cannot drift apart again.
+    -- Refusals: a Bottle-closable gap defers exactly like the wave arm (transient, the v0.1.386
+    -- drink closes it in 1-2 ticks); an unclosable gap returns "raid_broke" and lane_go
+    -- redecides through the planner (the v0.1.252 raid_far shape). No walk path on either.
+    -- ponytail: no March-CD-expiring-soon arm (design section 2, YAGNI) - add only if watched
+    -- games show raids deferred while March comes off cd under ~3s.
+    do
         local kc = abil_mana(State.keen, K.KEEN_MANA_FB)
         local mc = abil_mana(State.march, K.MARCH_MANA_FB)
-        local short = mc - (mana() - kc)
+        local short, chain
+        if not include_creeps then
+            short = mc - (mana() - kc)
+        else
+            local rc = abil_mana(State.rearm, K.REARM_MANA_FB)
+            local reserve = State.menu.escapeMana:Get()
+            chain = ready(State.march) and mc or math.max(reserve + rc, rc + mc)
+            short = chain - (mana() - kc)
+        end
         if short > 0 then
             local bt = NPC.GetItem(State.hero, "item_bottle", true)
             local ch = (bt and Ability.CanBeExecuted(bt) == -1 and Item.GetCurrentCharges
                         and Item.GetCurrentCharges(bt)) or 0
             if ch * K.BOTTLE_MANA_PER_CHARGE >= short then
                 State.keenNoFundT, State.keenNoFundGap = now(), short
-                logline(string.format("keen_defer why=mana raw=%.0f short=%.0f ch=%d", mana(), short, ch))
+                if include_creeps then
+                    logline(string.format("keen_defer why=mana raid=y raw=%.0f chain=%.0f short=%.0f ch=%d", mana(), chain, short, ch))
+                else
+                    logline(string.format("keen_defer why=mana raw=%.0f short=%.0f ch=%d", mana(), short, ch))
+                end
                 return false, "mana_defer"
+            elseif include_creeps then
+                return false, "raid_broke"   -- unclosable: no log here, lane_go's raid_broke branch logs the redecide
             end
         end
     end
@@ -5144,9 +5195,14 @@ local function lane_go(dest, raid)
             -- a ghost trip in the making - do NOT fall down the ladder into the 3000u walk it was
             -- supposed to replace; abandon the commit (the deep_reject pattern: suppress briefly
             -- so the immediate redecide jungles the window; the lane re-competes next decide).
-            if kwhy == "raid_far" then
-                logline(string.format("lane_go raid_reject (%.0f,%.0f) -> redecide", dest.x, dest.y))
-                suppress_shove(State.spot and State.spot.lane, now() + K.SHOVE_STUCK_S, "raid_reject")
+            -- v0.1.411: raid_broke (the full-chain affordability refusal, Bottle cannot close
+            -- the gap) takes the same exit - the raid cannot fund its first cast, so walking
+            -- the leg would statue on arrival; redecide and let the fountain refill node price
+            -- the recovery (TINKER_RAID_READINESS_DESIGN.md section 3).
+            if kwhy == "raid_far" or kwhy == "raid_broke" then
+                local tag = kwhy == "raid_far" and "raid_reject" or "raid_broke"
+                logline(string.format("lane_go %s (%.0f,%.0f) -> redecide", tag, dest.x, dest.y))
+                suppress_shove(State.spot and State.spot.lane, now() + K.SHOVE_STUCK_S, tag)
                 State.spot = nil; State.fsm = "DECIDE"; State.moveSince = nil
                 return nil
             end
@@ -6290,6 +6346,7 @@ local function fsm_move()
             end
             -- v0.1.258 I1 (the lane_go .234/.258 latch rule, same shape): transient
             -- refusals (cast_failed order-gap, disabler in reach) retry next tick.
+            -- v0.1.411: "raid_broke" cannot reach here - this caller never passes include_creeps (camp/move legs are not raids), so the raid arm never runs for it.
             if kwhy ~= "cast_failed" and kwhy ~= "disabler" and kwhy ~= "mana_defer" then State.keenedSpot = true end   -- no useful anchor hop: just walk from here (mana_defer v0.1.397: transient)
             kfail = kwhy
         elseif try_travel_blink(stand) then
@@ -7042,13 +7099,22 @@ local function bottle_tick()
     -- previous game evaluates as -900 < 1.0 = TRUE for the WHOLE new match instead of for one second.
     -- Identical inside a single match (age is never negative there), so this cannot move a live game.
     local rnfAge = State.rearmNoFundT and (now() - State.rearmNoFundT) or nil
+    -- v0.1.411 REPAIR OF A v0.1.397 LINE SLIP (found by the raid-gate adversarial review,
+    -- verified against the c732d96 diff): the wantKeen insertion landed BETWEEN wantRearm's
+    -- first line and its gap-closability continuation, silently capturing that clause into
+    -- wantKeen's expression. Consequence, measured: wantKeen also required a small
+    -- rearmNoFundGap (nil reads math.huge = false), so `bottle drink why=keen` fired ZERO
+    -- times in 48 logs, and wantRearm drank on ANY refusal regardless of whether the charges
+    -- close the gap. Each flavour now owns exactly its OWN gap clause, the shape v0.1.386
+    -- validated at g384/g385. The raid arm's mana_defer path depends on the keen flavour
+    -- actually firing, which is why the repair ships with the raid gate.
     local wantRearm = rnfAge ~= nil and rnfAge >= 0 and rnfAge < 1.0
+                      and (State.rearmNoFundGap or math.huge) <= ch * K.BOTTLE_MANA_PER_CHARGE
     -- v0.1.397: the keen flavour of the same rung (a lane keen was just deferred for mana the
     -- charges can cover). Two-sided age per the v0.1.389 rule.
     local knfAge = State.keenNoFundT and (now() - State.keenNoFundT) or nil
     local wantKeen = knfAge ~= nil and knfAge >= 0 and knfAge < 1.0
                      and (State.keenNoFundGap or math.huge) <= ch * K.BOTTLE_MANA_PER_CHARGE
-                      and (State.rearmNoFundGap or math.huge) <= ch * K.BOTTLE_MANA_PER_CHARGE
     if not (lowm or lowh or wantRearm or wantKeen) then return end
     if enemy_risk_at(origin(State.hero)) >= K.SHOVE_SAFE_RISK then return end -- bottle breaks on enemy damage
     -- v0.1.386: name the cause. `why=rearm` is the NEW rung and is the acceptance signal for the
@@ -7969,6 +8035,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-if LOG then LOG:info('Tinker brain v0.1.410 (FOG TRACKER FLIP, build 2 of TINKER_FOG_TRACKER_DESIGN. The live vision tracker now stamps on the dormancy-type argument, the gate the v0.1.409 shadow validated over two games. Fogged enemies finally age: the probable disc grows at the Liquipedia move cap, confidence decays, and a ghost older than the age cap stops pricing risk instead of pinning a frozen full-confidence point forever. The shadow surface is kept one build as a self-check: the shadow risk fields must now equal the live ones on every row. Age cap stays at five seconds, the value the flip gate was measured at. REVERT, not tune, on a death walking into a freshly fogged enemy or on mid shoves collapsing to fresh-fog vetoes.)') end
+if LOG then LOG:info('Tinker brain v0.1.412 (FOG BLAST-RADIUS CAPS, a regression fix of the v0.1.410 flip found by the g405 hunt. The flip made fog ages real, which armed two dormant consumers that had only ever seen age zero: the channel-threat disabler gate added an UNCAPPED probable-radius disc of up to 16500 units, so a Bane fogged over 40 seconds vetoed every keen cast site from across the map and forced 8000-unit walks, and the nearest-enemy-edge shrink zeroed the commit-risk payload measurement on most commits. Both now apply the risk kernel rule: a ghost staler than the fog age cap stops pricing, the fresh-fog disc stays, visible threats unchanged. The raid readiness gate from the previous build remains deployed and is still UNEXERCISED because that game never reached Keen level two; its validation carries forward. REVERT on a channel broken by a disabler that was fogged just outside the cap, or on any return of the map-wide keen veto.)') end
 
 return callbacks

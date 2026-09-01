@@ -1611,11 +1611,12 @@ end
 ---strict worst case instead of a distribution. Returns math.huge on an empty
 ---snapshot so "no enemies" is distinguishable from "enemy at 0u".
 ---
----Deliberately carries NO age_cap gate, unlike the risk kernel at :897: the
----kernel drops a stale ghost because it refuses to SCORE it, but an
----instrument that drops the same ghost logs ne=inf next to r1=0.00 and the
----calibration hole this field exists to fill reopens. It reports geometry,
----the kernel decides what geometry is worth.
+---The DEFAULT (opts.age_cap nil) carries no age gate. That was written when Vision
+---never stamped and every fogged row read age 0; the v0.1.410 flip made ages real and
+---the uncapped shrink zeroed ne= from stale ghosts (p50 1400 -> 0, g404/g405), so
+---v0.1.412 added opts.age_cap and Tinker's ne= caller now opts INTO the kernel's drop
+---rule (K.FOG_AGE_CAP), restoring kernel-agreement (tests D4/D5). A dropped-everything
+---snapshot still returns math.huge, the pre-existing "no enemies" sentinel.
 ---
 ---Component math on .x/.y, never pt:Distance2D: pt crosses the hero->lib
 ---boundary and callers pass plain {x,y} tables as well as engine Vectors
@@ -1629,10 +1630,17 @@ function Escape.NearestEnemyEdge(snap, pt, opts)
     local hs = snap and snap.heroes
     if not (hs and pt) then return math.huge end
     local fog_ms = (opts and opts.fog_ms) or 550
+    -- v0.1.412 opts.age_cap (nil = the old uncapped behaviour, back-compatible): the
+    -- v0.1.410 flip made h.age REAL, and the uncapped shrink then zeroed the edge for any
+    -- ghost older than ~ d / fog_ms: g404/g405 measured the ne= field's p50 collapsing
+    -- from ~1400 to 0, i.e. the commit-risk payload read a phantom enemy at touch range on
+    -- most commits. With a cap, a ghost STALER than age_cap stops pricing entirely (the
+    -- same rule as FogProximityRisk's kernel drop); the fresh-fog shrink is unchanged.
+    local age_cap = opts and opts.age_cap
     local best = math.huge
     for i = 1, #hs do
         local h = hs[i]
-        if h and h.pos then
+        if h and h.pos and not (age_cap and not h.visible and (h.age or 0) > age_cap) then
             local dx, dy = (h.pos.x or 0) - (pt.x or 0), (h.pos.y or 0) - (pt.y or 0)
             local edge = math.sqrt(dx * dx + dy * dy)
             if not h.visible then

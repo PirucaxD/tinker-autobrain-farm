@@ -2720,6 +2720,23 @@ describe("lib/escape - NearestEnemyEdge (commit risk v2, group D)", function()
             end
         end
     end)
+
+    it("D5 opts.age_cap drops STALE ghosts entirely (v0.1.412, the flip's armed shrink)", function()
+        -- The v0.1.410 flip made h.age real; without a cap a 30s ghost's disc (16500u)
+        -- zeroed the edge from anywhere (g404/g405: ne= p50 collapsed 1400 -> 0). With
+        -- the cap, a ghost STALER than age_cap stops pricing (the kernel's drop rule);
+        -- fresher ghosts keep the exact D2 shrink; visible enemies are never dropped.
+        local snap = { heroes = {
+            { pos = P(2000, 0), age = 0,  visible = true },     -- visible at 2000
+            { pos = P(1000, 0), age = 10, visible = false },    -- stale ghost: dropped under cap 5
+        } }
+        assert_eq(NEE(snap, P(0, 0), { age_cap = 5 }), 2000, "the stale ghost must not price")
+        assert_eq(NEE(snap, P(0, 0)), 0, "nil age_cap keeps the old uncapped behaviour")
+        local fresh = { heroes = { { pos = P(2000, 0), age = 3, visible = false } } }
+        assert_eq(NEE(fresh, P(0, 0), { age_cap = 5 }), 2000 - 3 * 550, "fresh-fog shrink unchanged")
+        local vis_old = { heroes = { { pos = P(700, 0), age = 40, visible = true } } }
+        assert_eq(NEE(vis_old, P(0, 0), { age_cap = 5 }), 700, "a VISIBLE hero is never dropped whatever its age field says")
+    end)
 end)
 
 local HV = require("lib.hero_value")
