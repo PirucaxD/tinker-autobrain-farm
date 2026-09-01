@@ -522,21 +522,6 @@ function Lane.BuildLaneStates(creeps, towers, heroes, opts)
     local lanes = {}
     for _, lane in ipairs({ "top", "mid", "bot" }) do
         local ew, aw = eByLane[lane], aByLane[lane]
-        -- v0.1.375: THIS LANE's towers, not all 24. PredictClash clamps the drift at the nearest
-        -- defending tower AHEAD (:397-402), scoring each by its projection ALONG drift_dir with NO
-        -- perpendicular bound, so any tower anywhere on the map with a positive projection could win
-        -- and become the crash target. Measured on 5 logs: 60-77% of every game's crash stamps named
-        -- an OFF-LANE tower (g374 156/224, ctd median 8087 against ctr=700, max 15431; one named a
-        -- bot-side tower at (4860,-6379) as TOP's crash target). Those stamps set State.crashSeen
-        -- (Tinker.lua:2573-2576) and CRASH_STICKY_S 10.0 carries them 10s forward into a decide,
-        -- where the defend_crash bypass (Tinker.lua:3741) skips the round-trip window check: g374
-        -- t=345.8 spent ~10.2s and a Keen on a top trip worth 0 gold on exactly that path.
-        -- towers_by_lane is already built above (:483-486) and already used correctly at :545/:561;
-        -- this was the one consumer still reading the unfiltered list. A lane's wave crashes that
-        -- lane's towers. ACCEPTED NARROWING: base/T4 towers sit near the diagonal and _assign_lane
-        -- (:86) puts them in "mid", so a side-lane wave pushing into the enemy base no longer reports
-        -- crashing - out of scope for the farm layer's defend, which is about OUR lane towers.
-        local clash = (ew or aw) and Lane.PredictClash(ew, aw, towers_by_lane[lane], opts) or nil  -- clash from VISIBLE positions only
         if not ew and opts.game_time then            -- fog-fill: estimate the unseen enemy wave (fogged ONLY)
             local est = Lane.ExpectedWave(opts.game_time, { super = opts.super, mega = opts.mega })
             est.lane, est.estimated = lane, true
@@ -563,6 +548,30 @@ function Lane.BuildLaneStates(creeps, towers, heroes, opts)
             end
             ew = est                                 -- a mirrored estimate HAS a front -> MeetingPoint works fogged
         end
+
+        -- v0.1.375: THIS LANE's towers, not all 24. PredictClash clamps the drift at the nearest
+        -- defending tower AHEAD (:397-402), scoring each by its projection ALONG drift_dir with NO
+        -- perpendicular bound, so any tower anywhere on the map with a positive projection could win
+        -- and become the crash target. Measured on 5 logs: 60-77% of every game's crash stamps named
+        -- an OFF-LANE tower (g374 156/224, ctd median 8087 against ctr=700, max 15431; one named a
+        -- bot-side tower at (4860,-6379) as TOP's crash target). Those stamps set State.crashSeen
+        -- (Tinker.lua:2573-2576) and CRASH_STICKY_S 10.0 carries them 10s forward into a decide,
+        -- where the defend_crash bypass (Tinker.lua:3741) skips the round-trip window check: g374
+        -- t=345.8 spent ~10.2s and a Keen on a top trip worth 0 gold on exactly that path.
+        -- towers_by_lane is already built above (:483-486) and already used correctly at :545/:561;
+        -- this was the one consumer still reading the unfiltered list. A lane's wave crashes that
+        -- lane's towers. ACCEPTED NARROWING: base/T4 towers sit near the diagonal and _assign_lane
+        -- (:86) puts them in "mid", so a side-lane wave pushing into the enemy base no longer reports
+        -- crashing - out of scope for the farm layer's defend, which is about OUR lane towers.
+        -- v0.1.414: the fog-fill above now runs BEFORE this call, so on a fogged lane the clash
+        -- receives the MIRROR-ESTIMATED enemy front instead of degenerating to one front (which
+        -- made contact = our own front, b = -1, drift_dir {0,0}, crash detection structurally dead
+        -- in fog = Tier-6 bug 7, settle = our own front, settle_eta pinned at the horizon constant,
+        -- and push= a direction artifact through g406's whole fogged stretch). clash.estimated says
+        -- which model fed it, so consumers choose; ally waves are NEVER estimated (our creeps are
+        -- always visible).
+        local clash = (ew or aw) and Lane.PredictClash(ew, aw, towers_by_lane[lane], opts) or nil
+        if clash then clash.estimated = (ew and ew.estimated) or false end
 
         local en, an = 0, 0
         if clash then

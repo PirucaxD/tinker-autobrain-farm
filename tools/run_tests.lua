@@ -1216,6 +1216,74 @@ describe("lib/lane -- BuildLaneStates fog-fill MIRROR (Piece 1.5)", function()
     end)
 end)
 
+describe("lib/lane -- clash on the fog-fill estimate (v0.1.414: fill BEFORE PredictClash)", function()
+    local paths = {
+        top = { { x = 0, y = 5000 },  { x = 4000, y = 5000 } },
+        mid = { { x = 0, y = 0 },     { x = 4000, y = 4000 } },
+        bot = { { x = 0, y = -5000 }, { x = 4000, y = -5000 } },
+    }
+    local function c(x, y, team, speed) return { pos = { x = x, y = y }, team = team, hp = 100, gold = 40, speed = speed } end
+
+    it("FOGGED lane: the clash consumes the mirror estimate - flagged, drifting, crash alive", function()
+        -- TOP enemy fogged, team 2. Our BOT wave at arc 1000 mirrors to a top enemy front at
+        -- (3000,5000); our TOP wave front (500,5000), strength 200; ExpectedWave(0).strength 1950.
+        -- contact = (1750,5000); b = (1950-200)/2150 = 0.81395; rate = 0.5*b*325 = 132.267;
+        -- budget = rate*6 = 793.6. Ally tower at (1000,5000) r700 sits 750 from the contact
+        -- (outside weight range, so it only clamps): along = 750 < budget -> travel = 750 ->
+        -- settle = (1000,5000), settle_eta = 750/132.267 = 5.670 < horizon 6. Before v0.1.414 this
+        -- lane was ONE-FRONT degenerate: contact = our own front, drift_dir {0,0}, crashing
+        -- structurally false (Tier-6 bug 7), settle = our own front, settle_eta = 6.0 constant.
+        local creeps = {
+            c(900, -5000, 2, 422), c(1000, -5000, 2, 422),   -- our BOT wave (the mirror source)
+            c(400, 5000, 2, 400),  c(500, 5000, 2, 400),     -- our TOP wave (the ally side of the clash)
+        }
+        local towers = { { pos = { x = 1000, y = 5000 }, team = 2, range = 700, alive = true } }
+        local lanes = Lane.BuildLaneStates(creeps, towers, {}, {
+            team = 2, enemy_push = { x = -1, y = 0 }, ally_push = { x = 1, y = 0 },
+            game_time = 0, paths = paths,
+            drift_coeff = 0.5, horizon = 6, creep_speed = 325, move_threshold = 0.1, tower_weight = 4000,
+        })
+        local top = lanes.top
+        assert_true(top.enemy_wave ~= nil and top.enemy_wave.estimated == true
+                    and top.enemy_wave.est_src == "mirror", "mirror estimate in place")
+        local cl = top.clash
+        assert_true(cl ~= nil, "clash predicted on the fogged lane")
+        assert_true(cl.estimated == true, "clash flagged estimated")
+        assert_true(math.abs(cl.drift_dir.x + 1) < 1e-6 and math.abs(cl.drift_dir.y) < 1e-6,
+            "drift_dir a real direction (toward our front), not {0,0}")
+        assert_true(cl.settle.x > 500 and cl.settle.x < 3000,
+            "settle BETWEEN the fronts, not on our own front; got " .. cl.settle.x)
+        assert_true(math.abs(cl.settle.x - 1000) < 1, "settle clamped at the tower line ~1000, got " .. cl.settle.x)
+        assert_true(cl.settle_eta > 0 and cl.settle_eta < 6 - 1e-6,
+            "settle clock a real estimate below the horizon constant; got " .. cl.settle_eta)
+        assert_true(cl.crashing and cl.crash_tower ~= nil and cl.crash_tower.team == 2,
+            "crash detection ALIVE in fog (Tier-6 bug 7 fixed)")
+        assert_eq(cl.pushing, "enemy")
+    end)
+
+    it("BOTH-REAL lane: estimated == false and the measured model is unchanged", function()
+        -- bot lane, everything visible. we = 300, wa = 200 -> b = 0.2; rate = 0.5*0.2*300 = 30;
+        -- travel = 30*6 = 180 -> settle = (4670,0). Same numbers as the pre-v0.1.414 model.
+        local function r(x, y, team) return { pos = { x = x, y = y }, team = team, hp = 100, gold = 40 } end
+        local creeps = {
+            r(5000, 0, 3), r(5100, 0, 3), r(5200, 0, 3),
+            r(4600, 0, 2), r(4700, 0, 2),
+        }
+        local bot = Lane.BuildLaneStates(creeps, {}, {}, {
+            team = 2, enemy_push = { x = -1, y = -1 }, ally_push = { x = 1, y = 1 },
+            game_time = 0,
+            drift_coeff = 0.5, horizon = 6, creep_speed = 300, move_threshold = 0.1, tower_weight = 4000,
+        }).bot
+        assert_true(bot.enemy_wave ~= nil and not bot.enemy_wave.estimated, "real wave, not an estimate")
+        local cl = bot.clash
+        assert_true(cl ~= nil and cl.estimated == false, "measured clash carries estimated = false")
+        assert_eq(cl.pushing, "enemy")
+        assert_eq(cl.w_enemy, 300); assert_eq(cl.w_ally, 200)
+        assert_true(math.abs(cl.contact.x - 4850) < 1e-6, "contact at the front midpoint")
+        assert_true(math.abs(cl.settle.x - 4670) < 1e-6, "settle = contact - 0.5*0.2*300*6, got " .. cl.settle.x)
+    end)
+end)
+
 describe("lib/lane -- SimFight (attrition combat sim; imbalance = damage, not just life)", function()
     local function melee(n) local t = {} for i = 1, n do t[i] = { hp = 550, dmg = 21, atk = 1, armor = 2, atype = "basic" } end return t end
     it("3v2 equal creeps -> the extra creep COMPOUNDS: 2 survivors, not 1", function()

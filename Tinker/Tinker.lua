@@ -1899,11 +1899,25 @@ local function keen_tp()
     if rl >= 1 and ready(State.rearm) then return { channel = rearm_channel() + K.KEEN_CHANNEL } end
     -- both on cd: the trip's real cost is the WAIT until the ladder can keen, not a walk
     -- (v0.1.230's 1e9 here walk-flipped the pricing world for the whole keen cd - the
-    -- run-51 fountain-walk regression). cd read is in-code verified (verify_cast).
-    local kcd = (Ability.GetCooldownTimeRemaining and Ability.GetCooldownTimeRemaining(State.keen)) or 5
+    -- run-51 fountain-walk regression).
+    -- v0.1.413 (audit item 3): these two reads were Ability.GetCooldownTimeRemaining, WHICH
+    -- DOES NOT EXIST in the UCZone API (the v0.1.350 note proved Ability.GetCooldown IS time
+    -- remaining, gitbook-verified; live use in walk_leg). The `and` chain short-circuited on
+    -- the nil field, so with keen AND rearm both down every route leg priced the or-5
+    -- fabrication (7.93s flat), and the audit measured that realizing 21-53s walks the
+    -- K.MAX_CAMP_TRAVEL_S 20s leg cap would have rejected (g406 walk=53.7 kcd=46.9).
+    -- Reclassified API-correctness by the precheck, not a behaviour fix: walk= is a
+    -- full-walk ESTIMATE at decision time, all three audit exemplars completed via rearm in
+    -- ~2.5s (zero realized harm, zero over-rejection either way), and Rearm has no cooldown
+    -- so this both-down branch is nearly unreachable. Shipped because it makes the code true
+    -- at zero cost. The or-fallbacks now cover ONLY a missing API, not every call. The other
+    -- two GetCooldownTimeRemaining sites are deliberately NOT migrated: cd_remaining
+    -- (:536/:539, blocked item D, the rearm_cancel_check half stays blocked) and
+    -- walk_or_wait (:5160, the g351 closed-negative wait_keen rung stays dead).
+    local kcd = (Ability.GetCooldown and Ability.GetCooldown(State.keen)) or 5
     local wait = kcd
     if rl >= 1 then
-        local rcd = (Ability.GetCooldownTimeRemaining and Ability.GetCooldownTimeRemaining(State.rearm)) or 5
+        local rcd = (Ability.GetCooldown and Ability.GetCooldown(State.rearm)) or 5
         wait = math.min(kcd, rcd + rearm_channel())
     end
     return { channel = wait + K.KEEN_CHANNEL }
@@ -2329,26 +2343,33 @@ local function keen_to_anchor(stand, include_creeps)
     do
         local kc = abil_mana(State.keen, K.KEEN_MANA_FB)
         local mc = abil_mana(State.march, K.MARCH_MANA_FB)
-        local short, chain
-        if not include_creeps then
-            short = mc - (mana() - kc)
+        -- v0.1.413 (audit wave-arm upgrade, pre-registered in TINKER_RAID_READINESS_DESIGN.md
+        -- section 4): the wave arm priced March mana only, so a non-raid lane keen could land
+        -- one cast short of the chain. TRUE exemplar g406 t=332.5: mana=305, chain=250 at
+        -- live rc=100, short=20 - arrived, rearm_nofund gap=1, aborted unsafe, walked home.
+        -- (The earlier t=533.9 attribution was a conflation: a risk abort, not mana; live
+        -- rcost runs 90-150 in the corpus, the FB 225 never appears.) Both arms now price the
+        -- SAME chain. EXCEPT Rearm unskilled (level 0, pre-6): charging its cost is
+        -- meaningless and the March-down case cannot be fixed by mana at all, so the
+        -- v0.1.397 mc-only short stands there. Refusal policy unchanged from v0.1.397/411.
+        local rlv = (State.rearm and Ability.GetLevel and Ability.GetLevel(State.rearm)) or 0
+        local chain
+        if not include_creeps and rlv < 1 then
+            chain = mc
         else
             local rc = abil_mana(State.rearm, K.REARM_MANA_FB)
             local reserve = State.menu.escapeMana:Get()
             chain = ready(State.march) and mc or math.max(reserve + rc, rc + mc)
-            short = chain - (mana() - kc)
         end
+        local short = chain - (mana() - kc)
         if short > 0 then
             local bt = NPC.GetItem(State.hero, "item_bottle", true)
             local ch = (bt and Ability.CanBeExecuted(bt) == -1 and Item.GetCurrentCharges
                         and Item.GetCurrentCharges(bt)) or 0
             if ch * K.BOTTLE_MANA_PER_CHARGE >= short then
                 State.keenNoFundT, State.keenNoFundGap = now(), short
-                if include_creeps then
-                    logline(string.format("keen_defer why=mana raid=y raw=%.0f chain=%.0f short=%.0f ch=%d", mana(), chain, short, ch))
-                else
-                    logline(string.format("keen_defer why=mana raw=%.0f short=%.0f ch=%d", mana(), short, ch))
-                end
+                logline(string.format("keen_defer why=mana%s raw=%.0f chain=%.0f short=%.0f ch=%d",
+                    include_creeps and " raid=y" or "", mana(), chain, short, ch))
                 return false, "mana_defer"
             elseif include_creeps then
                 return false, "raid_broke"   -- unclosable: no log here, lane_go's raid_broke branch logs the redecide
@@ -2773,7 +2794,12 @@ local function run_lane_scan(arm_overlay)
             or "-"
         local push = s.clash and (s.clash.pushing .. (s.clash.moving and "" or "/hold")) or "none"
         local crash = "-"
-        if s.clash and s.clash.crashing and s.clash.crash_tower then
+        -- v0.1.414: MEASURED clashes only. The lib fog-fill now feeds PredictClash an estimated
+        -- enemy wave, so a fogged lane CAN read crashing=true; but the stamp below is the v0.1.263
+        -- sticky memory feeding defend_crash (run-76), the scheduler's most absolute verdict, and
+        -- the crash arc's history says over-fire is the costly direction. An estimated clash must
+        -- never stamp it: crash= stays "-" on fogged lanes, exactly as it read before v0.1.414.
+        if s.clash and s.clash.crashing and s.clash.crash_tower and not s.clash.estimated then
             crash = (s.clash.crash_tower.team == State.team) and "allyTwr" or "enemyTwr"
             -- v0.1.263 STICKY CRASH MEMORY (run-76 t~1860: an 8-9 creep ~415g wave ate our
             -- bot T2 while every DECIDE sampled a crash=- instant - the flag flickers as the
@@ -3954,7 +3980,11 @@ local function schedule_ctx(lanes)
     -- (the gone_by_arrival shape, re-evaluated every 0.4s); once the tower actually falls,
     -- deep_era owns the lane exactly as today. Undamaged/fogged towers predict math.huge
     -- (the lib's conservative default) = zero behavior change outside an active melt.
-    if not crashTwrPos and cl and cl.crashing and cl.crash_tower and cl.crash_tower.team ~= State.team then
+    -- v0.1.414 review catch: `not cl.estimated` upholds the v0.1.241 ESTIMATES-NEVER-VETO law.
+    -- Pre-.414 a fogged clash could not reach here (crashing was structurally false); now the
+    -- mirror-fed clash CAN claim a crash, and this path feeds a covers=false VETO, so it must
+    -- stay measured-only like the defend arms.
+    if not crashTwrPos and cl and cl.crashing and not cl.estimated and cl.crash_tower and cl.crash_tower.team ~= State.team then
         crashTwrPos = { x = cl.crash_tower.pos.x, y = cl.crash_tower.pos.y }
     end
     local crash_twr_key = tower_key_near(crashTwrPos)
@@ -4053,7 +4083,12 @@ local function schedule_ctx(lanes)
                  -- v0.1.263: OR the sticky stamp (crash seen by the 2s scan within
                  -- CRASH_STICKY_S) - the instantaneous flag flickers mid-fight and every
                  -- decide can sample a false instant (run-76 bot T2).
-                 defend_crash = (((cl.crashing and cl.crash_tower and cl.crash_tower.team == State.team)
+                 -- v0.1.414: the LIVE arm requires a MEASURED clash, same rule as the crashSeen
+                 -- stamp - the fog-fill lets a fogged lane read crashing=true from an ESTIMATED
+                 -- enemy wave, and defend stays real-positions-only (sticky arm already gated at
+                 -- the stamp).
+                 defend_crash = (((cl.crashing and not cl.estimated and cl.crash_tower
+                                   and cl.crash_tower.team == State.team)
                                   or (State.crashSeen and now() - (State.crashSeen[K.HOME_LANE] or -1e9) < K.CRASH_STICKY_S))
                                  and dpts == 0) and true or false,
                  suppressed = shove_suppressed(K.HOME_LANE),
@@ -4189,7 +4224,9 @@ local function side_wave_ctx(lane, s)
     end
     -- v0.1.246 (TINKER_TOWER_DEATH_DESIGN.md): a MELTING crash tower dies before we arrive -
     -- the terminus (and the wave with it) is gone by then; named snub, re-competes next decide.
-    if not crashTwrPos and s.clash and s.clash.crashing and s.clash.crash_tower
+    -- v0.1.414 review catch: measured-only (the v0.1.241 estimates-never-veto law; this path
+    -- returns a tower_dying SNUB, i.e. a veto, and must not fire from a mirror-estimated crash).
+    if not crashTwrPos and s.clash and s.clash.crashing and not s.clash.estimated and s.clash.crash_tower
        and s.clash.crash_tower.team ~= State.team then
         crashTwrPos = { x = s.clash.crash_tower.pos.x, y = s.clash.crash_tower.pos.y }
     end
@@ -4256,7 +4293,10 @@ local function side_wave_ctx(lane, s)
                  -- rule outranks slack/far/gone but never unsafe/covers=false, unchanged.
                  -- v0.1.263: OR the sticky stamp (see run_lane_scan) - run-76's bot crash
                  -- flickered between decides and the defend never fired.
-                 defend_crash = (((s.clash and s.clash.crashing and s.clash.crash_tower
+                 -- v0.1.414: live arm measured-only, same rule as the crashSeen stamp (an
+                 -- ESTIMATED clash must never feed defend; sticky arm gated at the stamp).
+                 defend_crash = (((s.clash and s.clash.crashing and not s.clash.estimated
+                                   and s.clash.crash_tower
                                    and s.clash.crash_tower.team == State.team)
                                   or (State.crashSeen and now() - (State.crashSeen[lane] or -1e9) < K.CRASH_STICKY_S))
                                  and dpts == 0) and true or false,
@@ -4269,10 +4309,11 @@ local function side_wave_ctx(lane, s)
         risk = srisk, dpts = dpts, wave_eta = arrival, asrc = asrc,
         meet_eta = (pm and (bal or 0) >= 0) and (now() + math.max(0, pm.eta)) or nil,
         travel = travel, gold = (ew and ew.gold) or 0, cwhy = cwhy,
-        defend = (((s.clash and s.clash.crashing and s.clash.crash_tower
+        defend = (((s.clash and s.clash.crashing and not s.clash.estimated
+                    and s.clash.crash_tower
                     and s.clash.crash_tower.team == State.team)
                    or (State.crashSeen and now() - (State.crashSeen[lane] or -1e9) < K.CRASH_STICKY_S))
-                  and dpts == 0) and true or false,   -- v0.1.263: sticky OR, same as ctx.defend_crash above
+                  and dpts == 0) and true or false,   -- v0.1.263: sticky OR, same as ctx.defend_crash above; v0.1.414: measured-only, same as above
         crash_tower_key = crash_twr_key,                    -- v0.1.246: rides the spot for the hold tripwire
     }
 end
@@ -4388,9 +4429,12 @@ local function fsm_decide()
         local ki = State.keenInvest
         -- ki.spent = a camp engage already banked its casts and zeroed the counter (v0.1.347).
         if (State.marchCasts or 0) == 0 and not ki.spent then
-            logline(string.format("keen_waste lane=%s kind=%s asrc=%s resid=%.0f held=%.1f",
+            -- v0.1.413 (audit item 6): held= excludes operator-takeover windows (banked by the
+            -- autofarm toggle handler); tko=1 marks a toggle happened so the analyzer can tell.
+            logline(string.format("keen_waste lane=%s kind=%s asrc=%s resid=%.0f held=%.1f%s",
                 tostring(ki.lane or "-"), tostring(ki.kind or "-"),
-                tostring(ki.asrc or "-"), ki.resid or -1, now() - ki.t))
+                tostring(ki.asrc or "-"), ki.resid or -1,
+                now() - ki.t - (ki.excluded or 0), ki.excluded and " tko=1" or ""))
         end
         State.keenInvest = nil
     end
@@ -6608,9 +6652,15 @@ local function fsm_engage_wave(s)
                         -- v0.1.310: the step-in obeys tower_safe (d >= 1000, outside the real
                         -- 900 range) - the SAME binary that clamps every stand, so it can never
                         -- walk him into tower range for a W2 (the user's observed attack).
-                        if tower_safe({ x = tgt.x, y = tgt.y })
-                           and stand_depth({ x = tgt.x, y = tgt.y }) <= K.WALK_DEPTH_MAX + 50 then
+                        -- v0.1.413 (audit 2-dead-band): both vetoes used to fail SILENTLY, so a
+                        -- held first cast that never stepped in was invisible in the logs. Log
+                        -- line only (throttled ~2s), no flow change.
+                        local sits = tower_safe({ x = tgt.x, y = tgt.y })
+                        if sits and stand_depth({ x = tgt.x, y = tgt.y }) <= K.WALK_DEPTH_MAX + 50 then
                             move_to(tgt, "w_stepin")
+                        elseif now() - (State.stepInVetoLogT or 0) > 2 then
+                            State.stepInVetoLogT = now()
+                            logline(string.format("step_in_veto why=%s d=%.0f", sits and "depth" or "tower", dref0))
                         end
                     end
                 end
@@ -7944,6 +7994,19 @@ function callbacks.OnUpdateEx()
         State.lastEnableState = en
         logline(string.format("autofarm %s fsm=%s spot=%s", en and "ON" or "OFF",
             tostring(State.fsm), tostring(State.spot and State.spot.kind)))
+        -- v0.1.413 (audit item 6): the keenInvest latch survives a manual takeover, so
+        -- operator play inflated keen_waste held= 3-8x (5 of 10 corpus exemplars). Freeze
+        -- the clock across OFF windows: stamp offT on OFF, bank the off-duration into
+        -- .excluded on ON; the scoring site subtracts it and marks the line tko=1.
+        local ki = State.keenInvest
+        if ki then
+            if not en then
+                ki.offT = now()
+            elseif ki.offT then
+                ki.excluded = (ki.excluded or 0) + (now() - ki.offT)
+                ki.offT = nil
+            end
+        end
     end
     if not en then                                                          -- on (re)enable, start by refilling
         State.fsm = "RETURN"; State.spot = nil; return
@@ -8035,6 +8098,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-if LOG then LOG:info('Tinker brain v0.1.412 (FOG BLAST-RADIUS CAPS, a regression fix of the v0.1.410 flip found by the g405 hunt. The flip made fog ages real, which armed two dormant consumers that had only ever seen age zero: the channel-threat disabler gate added an UNCAPPED probable-radius disc of up to 16500 units, so a Bane fogged over 40 seconds vetoed every keen cast site from across the map and forced 8000-unit walks, and the nearest-enemy-edge shrink zeroed the commit-risk payload measurement on most commits. Both now apply the risk kernel rule: a ghost staler than the fog age cap stops pricing, the fresh-fog disc stays, visible threats unchanged. The raid readiness gate from the previous build remains deployed and is still UNEXERCISED because that game never reached Keen level two; its validation carries forward. REVERT on a channel broken by a disabler that was fogged just outside the cap, or on any return of the map-wide keen veto.)') end
+if LOG then LOG:info('Tinker brain v0.1.414 (FOG-FILL BEFORE CLASH, sequence item two of the lane audit. The wave-meet model now receives the mirror-estimated enemy front on fogged lanes instead of degenerating to one front, so drift, settle, push direction and the settle clock are real estimates rather than artifacts, and the clash carries an estimated flag. The defend crash stamp stays gated on measured clashes only, preserving the real-positions-only defend semantics. REVERT on defends firing from estimated waves or on push direction flapping against visible truth.)') end
 
 return callbacks
