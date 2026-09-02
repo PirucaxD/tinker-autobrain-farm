@@ -3795,9 +3795,17 @@ local function schedule_ctx(lanes)
     local crash_pos
     if not visible and not deep_era then
         local lm = State.laneMeet[K.HOME_LANE]
+        local lm_obs = lm and (now() - lm.t) <= K.LANE_MEET_TTL and lm.src == "obs"
         crash_pos = (lm and (now() - lm.t) <= K.LANE_MEET_TTL and { x = lm.x, y = lm.y })
                     or s.meeting
-        crash_pos = clamp_intercept(crash_pos, K.INTERCEPT_FWD_R)   -- v0.1.315 two-sided clamp + v0.1.323 forward intercept: meet the wave UP-LANE inside the walk-farmable band (never past the stairs line, never deep our-side); the live re-stand corrects once it shows.
+        -- v0.1.415 review catch (the re-pin blocker): the +600 forward push DOUBLE-COUNTS on an
+        -- observation-sourced stamp. An arrival observation is already the up-lane service
+        -- ground (measured depth p50~615 vs the true meet p50~77), so obs + 600 re-pins the aim
+        -- at the band edge for every stamp deeper than 500 (58.6 pct of corpus arrivals, the
+        -- exact statue equilibrium the honest writer exists to dissolve). The ratchet was
+        -- designed to push a MEET-REFERENCED ground forward; it still applies to the aim-sourced
+        -- fallback and to s.meeting (both meet-referenced). The band clamp applies to all.
+        crash_pos = clamp_intercept(crash_pos, lm_obs and 0 or K.INTERCEPT_FWD_R)   -- v0.1.315 two-sided clamp + v0.1.323 forward intercept (meet-referenced grounds only since v0.1.415)
     else
         crash_pos = (pm and pm.point) or s.meeting
     end
@@ -5486,6 +5494,53 @@ local function fsm_move_wave(s)
         -- anchor (which also stamps lastWaveT for the next cycle).
         local me0 = origin(State.hero)
         local d0 = me0:Distance(s.standSpot.stand)
+        -- v0.1.415 W2 THE BLIND-COMMIT RE-ANCHOR (TINKER_GROUND_TRACKING_DESIGN final shape, piece
+        -- B at bar K.WAVE_TRACK_RADIUS): a committed wave trip is blind past the tracker's search
+        -- around the committed refPoint (g406 t=366: the fog pre-cast fired into empty ground 7s
+        -- AFTER the scan printed the real wave 2000u up-lane, d=1735). When the committed lane's
+        -- freshest 2s scan reads REAL (est=n) and that front sits beyond K.WAVE_TRACK_RADIUS of
+        -- the refPoint, act ONCE per commit: within re-aim reach, re-seed the tracker from the
+        -- live front (update_wave_spot re-derives the ranged aim + the safe stand from the new
+        -- refPoint next tick) and clear the P0 watchdog for the new leg; beyond reach, plain
+        -- redecide with NO suppress (the wave is REAL and the planner must be free to re-dispatch
+        -- AT it - estimates still never veto, v0.1.241). The divergence bar and the re-aim reach
+        -- are the SAME constant (the v0.1.384 two-rulers law; 1600 is the commit's own blindness
+        -- radius - the precheck measured 2.5 firings/game here vs 4.88 at 600, oscillation
+        -- structurally impossible: monotone pursuit + this latch). The latch is spot-scoped (s.*
+        -- dies with the State.spot table a fresh dispatch replaces, the sibling per-spot latch
+        -- lifecycle); marchCasts==0 + no pending honours .292 (post-cast stays frozen); deep era
+        -- (their mid T1 down) stays 100% untouched, per the v0.1.196 rule.
+        if s.shove and not s.reanchored and not s.arrived and (State.marchCasts or 0) == 0 and not State.marchPending then
+            local scn = State.laneScan and State.laneScan[s.lane or K.HOME_LANE]
+            local ew2 = scn and scn.enemy_wave
+            if ew2 and not ew2.estimated and ew2.front then
+                local rdx, rdy = ew2.front.x - s.refPoint.x, ew2.front.y - s.refPoint.y
+                local dRe = math.sqrt(rdx * rdx + rdy * rdy)
+                if dRe > K.WAVE_TRACK_RADIUS then
+                    -- v0.1.415 review catch: NO deep-era gate here. The design's pre-registered
+                    -- exemplar (g406 t=366) is deep=1, and a t1alive conjunct excluded it plus
+                    -- ~45 pct of the trigger's own corpus. Safe without it: the trigger is a
+                    -- REAL read, the aim moves TOWARD observed reality, the redecide carries no
+                    -- suppress, and every deep-era leash/depth gate still bounds whatever the
+                    -- redecide dispatches (the v0.1.196 preemption rule is about scheduling,
+                    -- not aim honesty).
+                    s.reanchored = true
+                    if me0:Distance(Vector(ew2.front.x, ew2.front.y, me0.z)) <= K.WAVE_TRACK_RADIUS then
+                        s.refPoint = Vector(ew2.front.x, ew2.front.y, me0.z)
+                        s.standSpot.aim = Vector(ew2.front.x, ew2.front.y, me0.z)
+                        State.moveTrack = nil
+                        State.emptySince = nil          -- review: the old ground's overdue clock must not convert the NEW leg
+                        logline(string.format("reanchor d=%.0f -> aim", dRe))
+                        return                          -- review: end this tick; update_wave_spot owns the new leg next tick
+                    else
+                        logline(string.format("reanchor d=%.0f -> redecide", dRe))
+                        State.spot = nil; State.fsm = "DECIDE"; State.moveSince = nil
+                        State.marchPending = nil
+                        return
+                    end
+                end
+            end
+        end
         State.emptySince = State.emptySince or now()   -- fogged wait started (also arms the waveLiveT observed-arrival stamp)
         -- Piece 2 hold expiry (runs tethered OR at the stand): the committed waveEta can lie by
         -- seconds (fogged = the mirrored-front estimate). On expiry, re-ask the MEASURED rhythm
@@ -6015,7 +6070,27 @@ local function fsm_move_wave(s)
         -- the calibrated K.WAVE_PHASE. Do NOT "repair" this by subtracting the 950u engage range:
         -- that divides a HERO distance by a CREEP speed (bug class 3, ruler mismatch).
         State.laneWaveT[ln] = Lane.Schedule.NextOnGrid(now(), K.WAVE_PERIOD, K.WAVE_PHASE) - K.WAVE_PERIOD
-        State.laneMeet[ln] = { x = eref.x, y = eref.y, t = now() }
+        -- v0.1.415 W1 THE HONEST WRITER (TINKER_GROUND_TRACKING_DESIGN final shape): laneMeet was
+        -- DESIGNED (v0.1.303) as the last OBSERVED arrival ground, but this site stamped eref =
+        -- THE COMMITTED AIM since v0.1.303, while the design and the v0.1.323 banner justified the
+        -- forward ratchet on the observational premise. In fog the fwd-then-clamp picker feeding on
+        -- its own committed output has the depth-band edge as its unique attractor (92/97 fogged
+        -- aims pinned at ~1100, consecutive stamps p50=13u apart, iteration 600 -> 1100 -> 1100).
+        -- Stamp the LIVE TRACKED wave instead (update_wave_spot's count centroid = live.cx/cy,
+        -- present in 144/144 corpus arrivals). PREMISE CORRECTION (review catch): the old eref
+        -- was not always the frozen committed aim - once the tracker acquired, eref was the live
+        -- re-aimed trailing-ranged, itself geometrically confined near the pinned stand; the
+        -- frozen-aim case was the never-acquired fog arrival. Either way the stamp was
+        -- COMMIT-RELATIVE; the centroid is WAVE-relative. AND THE WRITER ALONE IS NOT ENOUGH
+        -- (the re-pin blocker): an arrival observation is already the up-lane service ground
+        -- (depth p50~615), so the picker's +600 forward push double-counted and re-pinned 58.6
+        -- pct of stamps at the band edge; since v0.1.415 the picker applies the forward push
+        -- ONLY to meet-referenced grounds (src=aim fallback, s.meeting), never to src=obs.
+        -- eref stays as the tagged fallback, and clamp_intercept itself is DELIBERATELY
+        -- untouched (unclamping the belief re-opens run-115; fix the INPUT, never the guard).
+        local lmx, lmy, lmsrc = eref.x, eref.y, "aim"
+        if live and live.cx then lmx, lmy, lmsrc = live.cx, live.cy, "obs" end
+        State.laneMeet[ln] = { x = lmx, y = lmy, t = now(), src = lmsrc }
         -- v0.1.309 re-applied .293 (ledger; run-113 evidence: eta_err +3..+10 all game -> fog
         -- W1s fired early and the whole chain read "W2 late"): stamp the per-lane arrival
         -- DRIFT (EMA, clamped 0..6) so the fog casts fire on the CORRECTED clock.
@@ -6031,9 +6106,14 @@ local function fsm_move_wave(s)
         -- still bound it ABOVE at the engage (min(s.shoveCasts, maxw, 2)), so slider=1 is
         -- respected; the wave_clear/dead exit still ends a wave that dies to W1 early.
         if live.n >= 2 and (s.shoveCasts or 2) < 2 then s.shoveCasts = 2 end
-        logline(string.format("wave_engage_arrived dWave=%.0f dref=%.0f creeps=%d trig=%s eta_err=%s",
+        s.arrived = true   -- v0.1.415 review: exact pre-arrival scoping for the W2 re-anchor (an ENGAGE->MOVE reposition must not re-enter it post-arrival)
+        -- v0.1.415 W1 rider (APPENDED, k=v parse unaffected - the .374 pattern): lm= names the
+        -- stamp source (obs|aim), lmd= the obs-vs-committed-aim delta. Throttle = the event
+        -- itself (one arrival per commit).
+        logline(string.format("wave_engage_arrived dWave=%.0f dref=%.0f creeps=%d trig=%s eta_err=%s lm=%s lmd=%.0f",
             dWave, dref, live.n, timed and "time" or "dist",
-            s.waveEta and string.format("%+.1f", now() - s.waveEta) or "-")); return
+            s.waveEta and string.format("%+.1f", now() - s.waveEta) or "-",
+            lmsrc, math.sqrt((lmx - eref.x) ^ 2 + (lmy - eref.y) ^ 2))); return
     end
     -- v0.1.330 THE STALLED-LIVE RELEASE (user un-parked g328 item 1: 124+51+47s = 222s of
     -- statues): [committed + at/near the stand + wave LIVE but beyond engage range + NOT
@@ -8098,6 +8178,6 @@ for cb_name, cb_fn in pairs(callbacks) do
     end
 end
 
-if LOG then LOG:info('Tinker brain v0.1.414 (FOG-FILL BEFORE CLASH, sequence item two of the lane audit. The wave-meet model now receives the mirror-estimated enemy front on fogged lanes instead of degenerating to one front, so drift, settle, push direction and the settle clock are real estimates rather than artifacts, and the clash carries an estimated flag. The defend crash stamp stays gated on measured clashes only, preserving the real-positions-only defend semantics. REVERT on defends firing from estimated waves or on push direction flapping against visible truth.)') end
+if LOG then LOG:info('Tinker brain v0.1.415 (HONEST GROUND, incident-C part one per TINKER_GROUND_TRACKING_DESIGN final shape. The lane meet memory now stamps the observed wave position at arrival instead of the committed aim, dissolving the band-edge fixed point the committed-aim self-feed had created, with the clamp deliberately untouched. And a committed wave trip whose wave turns out visible beyond the tracker radius re-anchors once or redecides without suppression. Post-cast stays frozen, estimates still never veto, the cadence dispatch is untouched. REVERT on the lane clock re-anchoring somewhere waves never arrive, on aim flapping, or on dispatches chasing ground away from the cadence.)') end
 
 return callbacks
