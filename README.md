@@ -6,7 +6,7 @@ reacts to enemy disables and threats with defensive item saves and escapes.
 It never auto-engages enemy heroes. Offense and combo layers are planned
 follow-ups on the same shared `lib/`.
 
-Current build: **Tinker.lua v0.1.406**. The script file, the in-game menu and
+Current build: **Tinker.lua v0.1.415**. The script file, the in-game menu and
 the log lines all still identify themselves as `Tinker` (the log analyzer and
 every saved log key off that), so only the project name changed here.
 

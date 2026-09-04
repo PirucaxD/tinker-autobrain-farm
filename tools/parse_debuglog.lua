@@ -75,6 +75,18 @@ Options:
                          the v0.1.362 fields; older logs read UNKNOWN, never zero. Background:
                          Tinker/TINKER_UNSTICK_LOOP_FINDINGS.md.
 
+  --thin-release         PIECE C PRECHECK (TINKER_GROUND_TRACKING_DESIGN.md sec 7): offline replay of the
+                         visible-thin early release over real logs, against pre-registered bars. Per
+                         pre-cast wave commit it reconstructs far (dref>950) + held (the stall clause)
+                         + the DECIDE's own real-read thin verdict, sweeps the hold 2/3/4s, and scores
+                         each replayed release GOOD (commit never cast; seconds saved) or CUT (the same
+                         commit cast W later: a precision failure). Pass the whole corpus.
+
+  --dead-band             QUEUE ITEM 2 PRECHECK: offline replay of the castless-engage watchdog relax
+                         (at the w_wait expiry, cast from where the hero stands instead of throwing the
+                         commit away). Scores each castless release CONVERT / NEUTRAL / BREAK, splits the
+                         conversions into FREE and REDIRECT, and prints the pre-registered bars.
+
 ]])
 end
 
@@ -138,6 +150,8 @@ for i = 1, #arg do
     elseif a == "--crash-report" then mode = "crash_report"; mode_count = mode_count + 1
     elseif a == "--mana-report" then mode = "mana_report"; mode_count = mode_count + 1
     elseif a == "--fog-shadow" then mode = "fog_shadow"; mode_count = mode_count + 1
+    elseif a == "--thin-release" then mode = "thin_release"; mode_count = mode_count + 1
+    elseif a == "--dead-band" then mode = "dead_band"; mode_count = mode_count + 1
     elseif a:match("^%-%-fog%-recalc=") then opt_fog_recalc = a:match("^%-%-fog%-recalc=(.+)$")
     elseif a == "--with-takeover" then opt_with_takeover = true
     elseif a == "--help" or a == "-h" then usage(); os.exit(0)
@@ -873,6 +887,46 @@ elseif mode == "farm_report" then
     local first_gpm, last_gpm
     for _, e in ipairs(farm) do if e.kv.gpm then first_gpm = first_gpm or e.kv.gpm; last_gpm = e.kv.gpm end end
     if first_gpm then print(string.format("    gpm: %s -> %s", first_gpm, last_gpm)) end
+
+    -- THE RE-ANCHOR CENSUS (v0.1.415 W2, the blind-commit re-anchor). The bridge has listed
+    -- "reanchor census sane" as a STANDING EVERY-GAME READ since the build shipped, and until now
+    -- no mode knew the token existed, so it was read with ad-hoc greps every time. That is the
+    -- eyeball-instead-of-instrument anti-pattern this project has a hard rule against.
+    -- READ THE REPEATS, NOT THE RAW COUNT. The raw count is what misleads: g409/g410/g411 ran
+    -- 0/2/19, which reads as a 10x explosion, while the quantity that actually moved is the
+    -- REDUNDANT repeats (0/0/6) and the longest run of consecutive fires at the SAME d (1/1/5).
+    -- A re-anchor is meant to fire ONCE per blind commit and hand the next decide a real ground;
+    -- the same d repeating across consecutive decides is the commit being re-dispatched and
+    -- re-anchored at the 0.4s cadence, i.e. flutter rather than a correction. That is bounded and
+    -- harmless when the bursts sit beside clean clears (g411: both bursts fell inside a metronomic
+    -- stretch, 18 arrivals, 12 clears), and it is the v0.1.415 REVERT SHAPE when they sit inside a
+    -- lane hole with waves not arriving. This line reports both so the next reader does not have
+    -- to re-derive which number matters.
+    do
+        local ds, runs, cur, prev = {}, 1, 1, nil
+        local seen, redundant = {}, 0
+        for _, e in ipairs(events) do
+            if e.event == "reanchor" then
+                local d = e.kv.d
+                ds[#ds + 1] = d
+                if d then
+                    if seen[d] then redundant = redundant + 1 else seen[d] = true end
+                    if d == prev then cur = cur + 1; if cur > runs then runs = cur end else cur = 1 end
+                    prev = d
+                end
+            end
+        end
+        if #ds > 0 then
+            print(string.format("re-anchor census (v0.1.415 W2): %d fires, %d redundant (a d seen before), longest same-d run %d",
+                #ds, redundant, runs))
+            print("    READ THE REPEATS, NOT THE COUNT. One fire per blind commit is the design; a d repeating")
+            print("    across consecutive decides is re-dispatch flutter. Baselines g409/g410/g411: 0/2/19 fires,")
+            print("    0/0/6 redundant, 1/1/5 longest run. It is the REVERT shape only when a burst sits inside a")
+            print("    lane hole with waves not arriving: cross-check --clock-report before calling it a defect.")
+        else
+            print("re-anchor census (v0.1.415 W2): 0 fires (no blind commit re-anchored, or a pre-v0.1.415 log)")
+        end
+    end
     os.exit(0)
 elseif mode == "lane_report" then
     -- Piece 1 (lane foundation): measure the WAVE INSTRUMENTS against observed reality, from the 2s
@@ -3389,7 +3443,7 @@ elseif mode == "state_report" then
             w.only_pollers and "[POLLER-ONLY] " or "", table.concat(str, ", ")))
     end
     os.exit(0)
-elseif mode ~= "fog_report" and mode ~= "stuck_report" and mode ~= "crash_report" and mode ~= "mana_report" and mode ~= "fog_shadow" then   -- v0.1.353/v0.1.362/v0.1.383/v0.1.409: fog_report, stuck_report, crash_report and fog_shadow are handled in their own blocks at the end of the file, so the timeline fallback must not also fire for them
+elseif mode ~= "fog_report" and mode ~= "stuck_report" and mode ~= "crash_report" and mode ~= "mana_report" and mode ~= "fog_shadow" and mode ~= "thin_release" and mode ~= "dead_band" then   -- v0.1.353/v0.1.362/v0.1.383/v0.1.409: fog_report, stuck_report, crash_report and fog_shadow are handled in their own blocks at the end of the file, so the timeline fallback must not also fire for them
     -- timeline mode. v6.15.2 low: sort kv keys deterministically per-line
     -- so diff-tooling output is stable between runs.
     for i = 1, #events do
@@ -4105,4 +4159,493 @@ elseif mode == "fog_shadow" then
         end
     end
     os.exit(0)
+elseif mode == "thin_release" then
+    -- PIECE C PRECHECK (TINKER_GROUND_TRACKING_DESIGN.md section 7): an OFFLINE REPLAY of the
+    -- visible-thin early release over real logs, run BEFORE any build against pre-registered bars.
+    -- THE CANDIDATE RULE, evaluated on every PRE-CAST tick of a committed wave trip (live branch):
+    --   far  = dref > WAVE_ENGAGE_RANGE 950                       (no arrival can fire)
+    --   held = variant S: wgClose < W_CLOSING_MIN 80 or wgN < 2   (the stall_release clause as shipped)
+    --          variant W: wgN >= 2 and |wgClose| < 80              (WARM only: the approach walk cannot trip it)
+    --   thin = the DECIDE's own real-read thin verdict on the committed lane's 2s scan:
+    --          est=n and (hp < SHOVE_THIN_EFFHP 400 or e <= SHOVE_THIN_CREEPS 1 held THIN_CREEPS_HOLD_S 2.0s)
+    --   release when far+held+thin hold CONTINUOUSLY for HOLD seconds (2/3/4 swept), pre-cast only.
+    -- WHY NOT the lead gate's n < W_PRE_MIN_N 3: that is the LEAD bar. The CAST bar is n>=2 (the ENGAGE
+    -- first-cast gate) and the corpus holds 2-creep waves that read n=2/held for 3s and then closed and
+    -- took two casts (g408 t=95.9). The decide ruler separates the exemplar (hp 393 pre-cast) from that
+    -- landmine (hp<400 only after its W1), and it is the ruler the NEXT decide vetoes on, so a release on
+    -- it cannot re-pick the same wave (bug class 3, ruler match).
+    -- INPUT ROWS: w_lead_reject prints on every refused live tick (1.0s throttle) with dref/close/wgn/n;
+    -- why=cast_done/pending rows are post-cast and excluded, every other why carries pre-cast geometry.
+    -- The lane scan (wavescan ln=<lane> e= est= hp=) is the 2s decide read; its rows are stamped with
+    -- their own SCAN t= (they print in the same run_lane_scan call), and the commit is seeded with the
+    -- last pre-dispatch scan of its lane (the read the decide itself consumed). Other rows interpolate
+    -- by event index between stamped rows, which drifts through unstamped bursts (save-chain, pos_lane):
+    -- the g408 exemplar's exit reads 313.4 here against a true 314.2. +-1s, stated, not hidden.
+    -- CLOCKS, rule-faithful: far+held is dated from its first continuous ROW; thin is dated from the SCAN
+    -- tick that turned it (hp path: the first consecutive real scan under the bar; lone path: the first
+    -- lone scan + 2.0s); P starts at the later of the two and the tick-level release is P-start + HOLD
+    -- (the printed row that would observe it is also shown). The hold does NOT reset across a row gap:
+    -- rearm/keen channels stop the live branch without changing any clause, exactly as the shipped
+    -- s.stallT latch ages through them. It DOES reset on a fogged (est=y) scan, the v0.1.241 law, and on
+    -- a wave_engage_arrived inside a row gap. NOT by construction: the TIMED trigger gates on dstand
+    -- and dWave, never on dref, and 43 of 281 corpus arrivals print dref > 950. The reset is a
+    -- deliberate conservative choice, because an arrival flips the FSM to ENGAGE and re-arms the
+    -- approach. It is also load-bearing for the P1 result: delete it and g400 t=514.9 becomes a CUT2
+    -- at holds 2.0 and 3.0, because the shipped s.stallT does NOT reset on the ENGAGE to MOVE flip.
+    -- THAT RESET IS A DELIBERATE DIVERGENCE FROM s.stallT, WHICH DOES NOT RESET ON THE ENGAGE->MOVE FLIP
+    -- (Tinker.lua:6129): g400 t=514.9 arrived at dref=810, repositioned, and cast W1 2.8s after a
+    -- stallT-shaped release would have cut it. So a Piece C built on the stall latch cuts that served
+    -- wave and a per-tick-continuous one does not. The precision of this rule is dating-sensitive, which
+    -- is itself an argument against the build; the tool reports the honest per-tick reading.
+    -- KNOWN BIAS, do not re-derive: unstamped bursts (save-chain, pos_lane/pos_shadow) skew the event-index
+    -- clock about 1s pessimistic at both ends. Hand-derived from engine anchors, the g408 exemplar releases
+    -- at 309.0 and exits at 314.2 (saved 5.2s) against this tool's 309.0 and 313.4 (saved 4.4s). Read the
+    -- GOOD>=5 column with that 1s in mind, and judge recall on the STATUE COUNT (a GOOD whose exit is
+    -- stall_release), which no interpolation can move.
+    -- EXITS: engage_done / stall_release / arrival_release / engage_release / engage_bail / contest_abandon /
+    -- defense_flee / overdue_convert / STUCK / autofarm / return / wave_move|wave_engage abort / raid_reject /
+    -- tether release / keen_home (return or panic purpose ONLY: an unstick keen_home prints AFTER the
+    -- redecide it triggers and belongs to the NEW commit) / the next farm row.
+    -- OUTCOME per replayed release: GOOD = the commit ended with 0 casts (saved = exit - release);
+    -- CUT2 = the same commit cast W after the release at 2+ creeps (a served wave cut: precision failure);
+    -- CUT1 = cast after the release at 1 creep (a straggler W the design does not value; reported).
+    -- MIRRORS of Tinker K: move them here in the same commit if K moves (the WAVE_PHASE lesson).
+    local ENGAGE, CLOSE_MIN, THIN_EHP, LONE_N, LONE_HOLD = 950, 80, 400, 1, 2.0
+    local HOLDS = { 1.0, 1.5, 2.0, 3.0, 4.0 }   -- the w_lead_reject row throttle is 1.0s, so a 2.0 floor hides the instrument's own best cell
+    local FRESH = 2.6      -- a scan older than this is stale (the scan runs every 2.0s)
+    local EXIT_EV = { engage_done = true, stall_release = true, arrival_release = true, engage_release = true,
+        engage_bail = true, contest_abandon = true, defense_flee = true, overdue_convert = true,
+        STUCK = true, autofarm = true, ["return"] = true }
+    local function is_exit(e)
+        if EXIT_EV[e.event] then return true end
+        if e.event == "keen_home" then return e.raw:find("purpose=return", 1, true) ~= nil or e.raw:find("purpose=panic", 1, true) ~= nil end
+        if (e.event == "wave_move" or e.event == "wave_engage") and e.raw:find("abort", 1, true) then return true end
+        if e.event == "lane_go" and e.raw:find("raid_reject", 1, true) then return true end
+        if e.event == "tether" and e.raw:find("release", 1, true) then return true end
+        return false
+    end
+    local VARIANTS = { "S", "W" }
+    local corp = {}
+    for _, v in ipairs(VARIANTS) do
+        corp[v] = { pever = 0 }
+        for _, h in ipairs(HOLDS) do corp[v][h] = { fires = 0, good = 0, good5 = 0, statue = 0, cut2 = 0, cut1 = 0, saved = 0 } end
+    end
+    local ncommits, nlogs = 0, 0
+    -- replay one commit under one variant; hold=nil measures only the longest continuous P run
+    local function replay(cm, variant, hold)
+        local si, scan = 1, nil
+        local loneSince, hpSince = nil, nil       -- scan-dated thin clocks
+        local fhSince = nil                        -- row-dated far+held clock
+        local ai, pmax = 1, 0
+        for _, r in ipairs(cm.rows) do
+            -- an arrival breaks P: far is false at the arrival tick by construction
+            while ai <= #cm.arrivals and cm.arrivals[ai] <= r.t do
+                if fhSince and cm.arrivals[ai] > fhSince then fhSince = nil end
+                ai = ai + 1
+            end
+            while si <= #cm.scans and cm.scans[si].t <= r.t do
+                scan = cm.scans[si]
+                if scan.est == "n" then
+                    if scan.e > 0 and scan.e <= LONE_N then loneSince = loneSince or scan.t else loneSince = nil end
+                    if scan.hp < THIN_EHP then hpSince = hpSince or scan.t else hpSince = nil end
+                else
+                    loneSince, hpSince = nil, nil   -- a fogged read is never thin (v0.1.241)
+                end
+                si = si + 1
+            end
+            local castBefore = false
+            for _, k in ipairs(cm.casts) do if k.t <= r.t then castBefore = true; break end end
+            local precast = (not castBefore) and r.why ~= "cast_done" and r.why ~= "pending"
+            local far = r.dref > ENGAGE
+            local held
+            if variant == "S" then held = (r.close < CLOSE_MIN) or (r.wgn < 2)
+            else held = (r.wgn >= 2) and (math.abs(r.close) < CLOSE_MIN) end
+            local fh = precast and far and held
+            if fh then fhSince = fhSince or r.t else fhSince = nil end
+            local thinSince
+            if scan and scan.est == "n" and (r.t - scan.t) <= FRESH then
+                if hpSince then thinSince = hpSince end
+                if loneSince and (r.t - loneSince) >= LONE_HOLD then
+                    local l = loneSince + LONE_HOLD
+                    if not thinSince or l < thinSince then thinSince = l end
+                end
+            end
+            if fh and thinSince then
+                local pstart = math.max(fhSince, thinSince)
+                local run = r.t - pstart
+                if run > pmax then pmax = run end
+                if hold and run >= hold then
+                    return { t = pstart + hold, row_t = r.t, row = r, scan = scan, since = pstart }, pmax
+                end
+            end
+        end
+        return nil, pmax
+    end
+    local function outcome(cm, fire)
+        local castAfter
+        for _, k in ipairs(cm.casts) do if k.t > fire.t and not castAfter then castAfter = k end end
+        if castAfter then
+            return { kind = (castAfter.n >= 2) and "CUT2" or "CUT1", delay = castAfter.t - fire.t, n = castAfter.n }
+        end
+        return { kind = "GOOD", saved = (cm.exit and cm.exit.t or fire.t) - fire.t }
+    end
+    print("--- thin-release precheck (Piece C) ---")
+    print("    rule: pre-cast + far (dref>950) + held (S: close<80 or wgn<2 | W: wgn>=2 and |close|<80) + the DECIDE thin ruler (real scan hp<400, or e<=1 held 2s), continuous for HOLD")
+    print("    GOOD = commit never cast after the release (saved = exit - release); CUT2 = cast at 2+ creeps after the release; CUT1 = cast at 1 creep")
+    print("    RELEASE = tick-level (P-start + hold); obs = the printed row that would first observe it. Exit times interpolate (+-1s through bursts).")
+    print("")
+    for _, p in ipairs(paths) do
+        local evs = load_log(p)
+        nlogs = nlogs + 1
+        local tt = {}
+        do
+            local lastI, lastT = nil, nil
+            for i, e in ipairs(evs) do
+                local ts = tonumber(e.kv.t)
+                if ts then
+                    if lastI then
+                        for j = lastI + 1, i - 1 do tt[j] = lastT + (ts - lastT) * (j - lastI) / (i - lastI) end
+                    else
+                        for j = 1, i - 1 do tt[j] = ts end
+                    end
+                    tt[i] = ts; lastI, lastT = i, ts
+                end
+            end
+            for j = (lastI or 0) + 1, #evs do tt[j] = lastT or 0 end
+        end
+        local commits, c = {}, nil
+        local lastScan, scanT = {}, nil
+        for i, e in ipairs(evs) do
+            local t = tt[i]
+            if e.event == "wavescan" then
+                if e.kv.t and not e.kv.ln then scanT = tonumber(e.kv.t) end
+                if e.kv.ln then
+                    local sc = { t = scanT or t, e = tonumber(e.kv.e) or 0, est = e.kv.est, hp = tonumber(e.kv.hp) or 0 }
+                    lastScan[e.kv.ln] = sc
+                    if c and e.kv.ln == c.lane then c.scans[#c.scans + 1] = sc end
+                end
+            elseif e.event == "farm" then
+                if c then c.exit = c.exit or { what = "next_decide", t = t }; c = nil end
+                if e.kv.pick == "shove" and e.kv.lane then
+                    c = { lane = e.kv.lane, t0 = t, asrc = e.kv.asrc, vis = e.kv.vis, e0 = e.kv.e, rows = {}, scans = {}, casts = {}, arrivals = {} }
+                    if lastScan[e.kv.lane] then c.scans[1] = lastScan[e.kv.lane] end   -- the read the decide consumed
+                    commits[#commits + 1] = c
+                end
+            elseif c then
+                if e.event == "w_lead_reject" and e.kv.ln == c.lane then
+                    c.rows[#c.rows + 1] = { t = t, why = e.kv.why, dref = tonumber(e.kv.dref) or 0, close = tonumber(e.kv.close) or 0,
+                                            wgn = tonumber(e.kv.wgn) or 0, n = tonumber(e.kv.n) or 0, dstand = tonumber(e.kv.dstand) or 0 }
+                elseif e.event == "wave_engage_arrived" then
+                    c.arrivals[#c.arrivals + 1] = t
+                elseif e.event == "march_aim" then
+                    -- src=shove carries creeps=; src=shove_pre has no count but the fire gate proves n>=3;
+                    -- anything else unknown counts as a served wave (99), the conservative reading for a CUT
+                    c.casts[#c.casts + 1] = { t = t, src = e.kv.src, n = tonumber(e.kv.creeps) or ((e.kv.src == "shove_pre") and 3) or 99 }
+                elseif is_exit(e) then
+                    c.exit = { what = e.event .. ((e.kv.reason and ("/" .. e.kv.reason)) or ""), t = t, casts = tonumber(e.kv.casts) }
+                    c = nil
+                end
+            end
+        end
+        if c then c.exit = { what = "EOF", t = tt[#evs] or 0 } end
+        ncommits = ncommits + #commits
+        local name = p:match("([^/\\]+)$") or p
+        print(string.format("== %s: %d wave commits", name, #commits))
+        for _, v in ipairs(VARIANTS) do
+            local pever = 0
+            for _, cm in ipairs(commits) do
+                local _, pm = replay(cm, v, nil)
+                if replay(cm, v, 0) then pever = pever + 1 end
+                cm.pmax = cm.pmax or {}; cm.pmax[v] = pm
+            end
+            corp[v].pever = corp[v].pever + pever
+            for _, h in ipairs(HOLDS) do
+                local agg = corp[v][h]
+                for _, cm in ipairs(commits) do
+                    local fire = replay(cm, v, h)
+                    if fire then
+                        local o = outcome(cm, fire)
+                        agg.fires = agg.fires + 1
+                        if o.kind == "GOOD" then
+                            agg.good = agg.good + 1; agg.saved = agg.saved + o.saved
+                            if o.saved >= 5 then agg.good5 = agg.good5 + 1 end
+                            if cm.exit and (cm.exit.what or ""):match("^stall_release") then agg.statue = agg.statue + 1 end
+                        elseif o.kind == "CUT2" then agg.cut2 = agg.cut2 + 1
+                        else agg.cut1 = agg.cut1 + 1 end
+                        print(string.format("   [%s hold=%.1f] %-3s disp=%-6.1f %s/%s e%s | P since %.1f -> RELEASE @%.1f (obs row @%.1f why=%s n=%d dref=%.0f close=%.0f wgn=%d dstand=%.0f; scan e=%d hp=%.0f) -> %s%s | exit=%s@%.1f casts=%s",
+                            v, h, cm.lane, cm.t0, cm.asrc or "-", cm.vis or "-", cm.e0 or "-", fire.since, fire.t, fire.row_t,
+                            fire.row.why, fire.row.n, fire.row.dref, fire.row.close, fire.row.wgn, fire.row.dstand, fire.scan.e, fire.scan.hp,
+                            o.kind, o.kind == "GOOD" and string.format(" saved=%.1fs", o.saved) or string.format(" cast +%.1fs @n=%d", o.delay, o.n),
+                            cm.exit and cm.exit.what or "?", cm.exit and cm.exit.t or -1, tostring(cm.exit and cm.exit.casts or "-")))
+                    end
+                end
+            end
+            -- every commit the predicate touched without reaching the shortest hold
+            for _, cm in ipairs(commits) do
+                if replay(cm, v, 0) and cm.pmax[v] < HOLDS[1] then
+                    print(string.format("   [%s] near-miss %-3s disp=%-6.1f P held %.1fs (< hold %.1f) exit=%s casts=%s", v, cm.lane, cm.t0, cm.pmax[v], HOLDS[1], cm.exit and cm.exit.what or "?", tostring(cm.exit and cm.exit.casts or "-")))
+                end
+            end
+            print(string.format("   [%s] commits with the predicate ever true (any duration): %d of %d", v, pever, #commits))
+        end
+    end
+    print("")
+    print(string.format("--- CORPUS (%d logs, %d wave commits) ---", nlogs, ncommits))
+    print(string.format("%-4s %-5s %6s %6s %7s %7s %5s %5s %9s", "var", "hold", "fires", "GOOD", "GOOD>=5", "STATUE", "CUT2", "CUT1", "saved_s"))
+    for _, v in ipairs(VARIANTS) do
+        for _, h in ipairs(HOLDS) do
+            local a = corp[v][h]
+            print(string.format("%-4s %-5.1f %6d %6d %7d %7d %5d %5d %9.1f", v, h, a.fires, a.good, a.good5, a.statue, a.cut2, a.cut1, a.saved))
+        end
+        print(string.format("   %s: predicate ever true in %d commits", v, corp[v].pever))
+    end
+    print("")
+    print("PRE-REGISTERED BARS: R1 the g408 disp=299.1 commit releases by t=310.5 at hold 2.0; R2 GOOD>=5 count >= 3 over the corpus;")
+    print("P1 CUT2 == 0 at the chosen hold (hard); P2 CUT1 <= 2. Rule: smallest hold meeting R1+P1; R2 failing = no build; P1 failing everywhere = STOP.")
+    -- COMPUTED FROM THIS RUN, never asserted. An earlier cut of this mode printed the 2026-09-02
+    -- corpus verdict as a static string, so it announced "the stand statue is ONE commit in 414"
+    -- under a table reading zero commits, and would have kept printing CLOSED NEGATIVE on the very
+    -- corpus that trips the tripwire. That is the law this file's own header cites: a report must
+    -- not print a corpus constant it can compute.
+    do
+        local a = corp["S"][2.0]
+        print(string.format("THIS RUN (%d log(s), %d wave commits, variant S at hold 2.0): R2 GOOD>=5 %d -> %s; P1 CUT2 %d -> %s; P2 CUT1 %d -> %s.",
+            nlogs, ncommits, a.good5, (a.good5 >= 3) and "PASS" or "FAIL",
+            a.cut2, (a.cut2 == 0) and "PASS" or "FAIL", a.cut1, (a.cut1 <= 2) and "PASS" or "FAIL"))
+        print(string.format("TRIPWIRE: STATUE = %d over %d log(s). Piece C REOPENS at STATUE >= 3 over any 10-game corpus.", a.statue, nlogs))
+    end
+    print("HISTORICAL, the 2026-09-02 reference run over g396-g410 (414 commits), NOT this run: R1 PASS (release")
+    print("309.0 <= 310.5, hand-derived from engine anchors; on this tool's event-index clock the exemplar saves")
+    print("4.4s, so its own GOOD>=5 column reads 0), P1 PASS, P2 PASS, R2 FAIL (1 of 3 hand-corrected). Piece C")
+    print("CLOSED NEGATIVE on R2: the stand statue was ONE commit in 414. Detail: TINKER_GROUND_TRACKING_DESIGN.md sec 7.")
+    os.exit(0)
+elseif mode == "dead_band" then
+    -- THE DEAD-BAND PRECHECK (bridge queue item 2). An OFFLINE REPLAY of the castless-engage
+    -- watchdog relax, run BEFORE any build, against bars pre-registered in the design pass.
+    -- THE CANDIDATE RULE, evaluated at the tick the v0.1.377 watchdog is about to throw a
+    -- committed wave away (Tinker.lua:6668), where wwRef = me:Distance(s.standSpot.aim):
+    --   C1 live.n >= 2                 (the arrival gate's own worth test; stragglers keep being refused)
+    --   C2 wwRef <= WAVE_ENGAGE_RANGE  (950, the bound that ADMITTED the commit, same ruler)
+    --   C3 not s.wwRelax               (one relax per commit)
+    --   C4 ready(State.march)
+    -- On all four: relax instead of releasing, restart the wait clock, and let the existing
+    -- first-cast path fire from where the hero stands. Otherwise release exactly as today.
+    -- WHY THE FIRE SITE IS THE EXPIRY AND NOT A SHORTER HOLD: a commit that casts naturally NEVER
+    -- reaches the expiry, so preemption is zero BY CONSTRUCTION rather than by a tuned hold, and
+    -- the delay constant is K.W_WAIT_RELEASE_S itself. Firing at 2.0s buys zero extra recall on
+    -- this corpus and would preempt band arrivals that already cast.
+    -- WHY THIS REPLAY IS ROBUST: the rule can only fire on a tick where the shipped code ALREADY
+    -- PRINTS A ROW. Every `engage_release reason=w_wait ... casts=0` row IS an expiry tick and it
+    -- prints dref= and n=, two of the four conjuncts, on the gate's own ruler. Nothing here is
+    -- decided by a sub-second reading, so the event-index clock drift (about 1s through unstamped
+    -- bursts, same as --thin-release) cannot move a verdict.
+    -- THE WEAK LINK, stated: C4 has no log field. The proxy is a `wait_end why=W wait` episode,
+    -- whose ONLY producer is the State.waitInfo assignment that sits inside
+    -- the `if ready(State.march)` branch. Its logger runs in OnUpdateEx, so it can print AFTER the
+    -- commit's exit row: episodes are attached over an EVENT window, never by clock. The shipped
+    -- build carries an `rlx=` field to settle this in the first post-ship log.
+    -- MIRRORS of Tinker K: move them here in the same commit if K moves (the WAVE_PHASE lesson).
+    local ENGAGE, CAST_REACH, RELEASE_S = 950, 700, 4.0
+    local EP_WINDOW = 40           -- events after the release in which its W-wait episode may print
+    -- BREAK baselines, measured over g396-g411 by the design pass. These must not move: the rule
+    -- is reachable ONLY inside the expiry branch, so nothing that casts today can be preempted.
+    local BASE_EXPIRY, BASE_INBAND_ARR, BASE_BUDGET2 = 20, 202, 201
+    local BASE_LOGS = 16     -- the pre-registered corpus is g396-g411: the bars mean nothing on a subset
+    local nlogs = 0
+    local EXIT_EV = { engage_done = true, stall_release = true, arrival_release = true, engage_release = true,
+        engage_bail = true, contest_abandon = true, defense_flee = true, overdue_convert = true,
+        STUCK = true, autofarm = true, ["return"] = true }
+    local function is_exit(e)
+        if EXIT_EV[e.event] then return true end
+        if e.event == "keen_home" then return e.raw:find("purpose=return", 1, true) ~= nil or e.raw:find("purpose=panic", 1, true) ~= nil end
+        if (e.event == "wave_move" or e.event == "wave_engage") and e.raw:find("abort", 1, true) then return true end
+        if e.event == "lane_go" and e.raw:find("raid_reject", 1, true) then return true end
+        if e.event == "tether" and e.raw:find("release", 1, true) then return true end
+        return false
+    end
+    local corp = { convert = 0, thin = 0, far = 0, march_cd = 0, spent = 0, relax = 0,
+                   free = 0, redirect_lost = 0, redirect_even = 0,
+                   expiry = 0, inband_arr = 0, budget2 = 0, statues = {}, names = {}, dbl = 0, multi = 0 }
+    print("--- dead-band precheck (queue item 2) ---")
+    print("    rule: at the w_wait expiry, relax instead of releasing when n>=2 AND dref<=950 AND March ready AND not already relaxed")
+    print("    CONVERT = the castless release becomes a cast | NEUTRAL = still releases (refusing conjunct named)")
+    print("    FREE = the release was going to pick=none anyway (pure gain) | REDIRECT_LOST = its alternative was worth more")
+    print("")
+    for _, p in ipairs(paths) do
+        nlogs = nlogs + 1
+        local evs = load_log(p)
+        local name = p:match("([^/\\]+)$") or p
+        local tt = {}
+        do
+            local lastI, lastT = nil, nil
+            for i, e in ipairs(evs) do
+                local ts = tonumber(e.kv.t)
+                if ts then
+                    if lastI then
+                        for j = lastI + 1, i - 1 do tt[j] = lastT + (ts - lastT) * (j - lastI) / (i - lastI) end
+                    else
+                        for j = 1, i - 1 do tt[j] = ts end
+                    end
+                    tt[i] = ts; lastI, lastT = i, ts
+                end
+            end
+            for j = (lastI or 0) + 1, #evs do tt[j] = lastT or 0 end
+        end
+        -- pass 1: every W-wait episode index, and the corpus BREAK baselines
+        local wwep = {}
+        for i, e in ipairs(evs) do
+            if e.event == "wait_end" and e.raw:find("why=W wait", 1, true) then wwep[#wwep + 1] = { i = i, claimed = 0, dur = tonumber(e.kv.dur) } end
+            if e.event == "wave_engage_arrived" then
+                local d, c = tonumber(e.kv.dref), tonumber(e.kv.creeps)
+                if d and c and d > CAST_REACH and d <= ENGAGE and c >= 2 then corp.inband_arr = corp.inband_arr + 1 end
+            end
+            if e.event == "engage_done" and e.kv.reason == "budget" and e.kv.casts == "2" then corp.budget2 = corp.budget2 + 1 end
+        end
+        -- pass 2: commits, their releases, the lane scan at the release, and the alternative after it
+        local rels, c, nc = {}, nil, 0
+        local lastScan = {}
+        for i, e in ipairs(evs) do
+            if e.event == "wavescan" and e.kv.ln then lastScan[e.kv.ln] = e end
+            if e.event == "w_wait_relax" then corp.relax = corp.relax + 1 end
+            if e.event == "farm" then
+                if c then c = nil end
+                if e.kv.pick == "shove" and e.kv.lane then
+                    c = { lane = e.kv.lane, i0 = i, t0 = tt[i], arr = nil, nrel = 0 }
+                    nc = nc + 1
+                end
+            elseif c then
+                if e.event == "wave_engage_arrived" then c.arr = tt[i]
+                elseif e.event == "engage_release" and e.kv.reason == "w_wait" then
+                    c.nrel = c.nrel + 1
+                    if e.kv.casts == "0" then
+                        local sc = lastScan[c.lane]
+                        rels[#rels + 1] = { i = i, t = tt[i], lane = c.lane, arr = c.arr, rlx = e.kv.rlx,
+                            dref = tonumber(e.kv.dref) or 0, n = tonumber(e.kv.n) or 0,
+                            e = sc and tonumber(sc.kv.e) or nil, hp = sc and tonumber(sc.kv.hp) or nil,
+                            gold = sc and tonumber(sc.kv.gold) or nil, cn = c }
+                    end
+                    if c.nrel > 1 then corp.multi = corp.multi + 1 end
+                    c = nil
+                elseif is_exit(e) then c = nil end
+            end
+        end
+        corp.expiry = corp.expiry + #rels
+        -- attach the C4 proxy and the alternative
+        for _, r in ipairs(rels) do
+            for _, ep in ipairs(wwep) do
+                if not r.ready and ep.i >= r.cn.i0 and ep.i <= r.i + EP_WINDOW then
+                    r.ready, r.dur, ep.claimed = true, ep.dur, ep.claimed + 1
+                end
+            end
+            for i = r.i + 1, math.min(#evs, r.i + 60) do
+                local e = evs[i]
+                if e.event == "farm" and e.kv.pick and (tt[i] - r.t) <= 2.0 then
+                    r.alt_pick = e.kv.pick
+                    r.alt_val = tonumber(e.kv.cval) or tonumber(e.kv.sgold) or nil
+                    break
+                end
+            end
+        end
+        for _, ep in ipairs(wwep) do if ep.claimed > 1 then corp.dbl = corp.dbl + 1 end end
+        print(string.format("== %s: %d wave commits, %d castless w_wait release(s)", name, nc, #rels))
+        for _, r in ipairs(rels) do
+            -- precedence must MATCH the shipped rlx= field: spent, then thin, then far, then march_cd.
+            -- POST-SHIP (v0.1.416+) the hero EMITS the conjunct, so READ IT and stop re-deriving it.
+            -- Without this the tool scored the fix's own FAILURE signal as a success: a relax that stood
+            -- a second window and cast nothing (rlx=spent) was reported CONVERT FREE, proved by running
+            -- it on a synthetic post-ship log. The field may read `spent/thin`: the head is the class.
+            local why = r.rlx and r.rlx:match("^[^/]+")
+            if not why then
+                if r.n < 2 then why = "thin"
+                elseif r.dref > ENGAGE then why = "far"
+                elseif not r.ready then why = "march_cd" end
+            end
+            if why and corp[why] == nil then corp[why] = 0 end
+            if why then
+                corp[why] = corp[why] + 1
+                print(string.format("   NEUTRAL rlx=%-8s %-3s L~%d dref=%-5.0f n=%d  (e=%s hp=%s gold=%s)",
+                    why, r.lane, r.i, r.dref, r.n, tostring(r.e), tostring(r.hp), tostring(r.gold)))
+            else
+                corp.convert = corp.convert + 1
+                corp.names[#corp.names + 1] = string.format("%s:%d(%.0f/%d)", name:gsub("^debug%.", ""):gsub("%.log$", ""), r.i, r.dref, r.n)
+                local vclass
+                if r.alt_pick == "none" or r.alt_pick == "recover" or r.alt_pick == nil then vclass = "FREE"
+                elseif r.alt_val and r.gold and r.alt_val > r.gold then vclass = "REDIRECT_LOST"
+                else vclass = "REDIRECT_EVEN" end
+                corp[vclass == "FREE" and "free" or (vclass == "REDIRECT_LOST" and "redirect_lost" or "redirect_even")] =
+                    corp[vclass == "FREE" and "free" or (vclass == "REDIRECT_LOST" and "redirect_lost" or "redirect_even")] + 1
+                local st = (r.arr and r.t) and (r.t - r.arr) or -1
+                corp.statues[#corp.statues + 1] = st
+                print(string.format("   CONVERT %-14s %-3s L~%d dref=%-5.0f n=%d wwdur=%-4s (e=%s hp=%s gold=%s) alt=%s%s stand=%.1fs",
+                    vclass, r.lane, r.i, r.dref, r.n, tostring(r.dur),
+                    tostring(r.e), tostring(r.hp), tostring(r.gold), tostring(r.alt_pick),
+                    r.alt_val and ("/" .. r.alt_val) or "", st))
+            end
+        end
+    end
+    table.sort(corp.statues)
+    local med = (#corp.statues > 0) and corp.statues[math.ceil(#corp.statues / 2)] or 0
+    local mx = (#corp.statues > 0) and corp.statues[#corp.statues] or 0
+    print("")
+    print("--- CORPUS ---")
+    print(string.format("  CONVERT %d | NEUTRAL thin %d, far %d, march_cd %d, spent %d  (sum %d)",
+        corp.convert, corp.thin, corp.far, corp.march_cd, corp.spent,
+        corp.convert + corp.thin + corp.far + corp.march_cd + corp.spent))
+    print(string.format("  VALUE: FREE %d | REDIRECT_LOST %d | REDIRECT_EVEN %d", corp.free, corp.redirect_lost, corp.redirect_even))
+    print(string.format("  STANDING under the rule: median %.1fs  max %.1fs  (ceiling 2 x %.1f = %.1fs by construction)", med, mx, RELEASE_S, 2 * RELEASE_S))
+    print(string.format("  CONVERT set: %s", table.concat(corp.names, " ")))
+    print("")
+    if nlogs ~= BASE_LOGS and corp.relax == 0 then
+        -- THE BARS ARE PRE-REGISTERED FOR A SPECIFIC 16-LOG CORPUS (g396-g411) and are absolute
+        -- counts, so running them on ONE fresh log prints R1/P1 FAIL on a perfectly healthy game.
+        -- That is the same error as applying them post-ship: a bar is only a bar on the population
+        -- it was registered against. STEP 0 reads single logs, so census there and bar on the corpus.
+        print(string.format("--- SUBSET CENSUS (%d log(s), not the %d-log pre-registered corpus: the bars do NOT apply) ---", nlogs, BASE_LOGS))
+        print(string.format("  castless w_wait expiries %d | would CONVERT %d | NEUTRAL thin %d, far %d, march_cd %d",
+            corp.expiry, corp.convert, corp.thin, corp.far, corp.march_cd))
+        print(string.format("  of the conversions: FREE %d, REDIRECT_LOST %d, REDIRECT_EVEN %d", corp.free, corp.redirect_lost, corp.redirect_even))
+        print("  EXPECTED RATE from the pre-registered corpus: 1.25 expiries and 0.56 conversions per game.")
+        print("  Run the full g396-g411 corpus to evaluate the bars.")
+        os.exit(0)
+    end
+    if corp.relax > 0 then
+        -- v0.1.416 POST-SHIP: this corpus contains the SHIPPED rule, so the pre-registered bars below
+        -- are frozen to the rule this build REPLACED and would report FAIL on a WORKING fix (the
+        -- v0.1.383 lesson: derive the bar from the rule that is actually running). The nine conversions
+        -- become casts and stop printing a release at all. Report the shipped instrument instead.
+        print("--- POST-SHIP CENSUS (w_wait_relax present: the pre-registered bars do NOT apply) ---")
+        print(string.format("  relaxes %d | converted to a cast (upper bound) %d | released rlx=spent %d",
+            corp.relax, corp.relax - corp.spent, corp.spent))
+        print(string.format("  releases by EMITTED conjunct: thin %d, far %d, march_cd %d, spent %d",
+            corp.thin, corp.far, corp.march_cd, corp.spent))
+        print("  WATCH: spent at half the relaxes or more means the relax fires and the cast still does")
+        print("  not land, i.e. the premise that only the reach gate was refusing is FALSE. Revert hunk 2")
+        print("  and do NOT widen K.W_CAST_REACH (set twice by watched behaviour, mechanism unidentified).")
+        os.exit(0)
+    end
+    print("--- PRE-REGISTERED BARS (set before this run; a failed bar STOPS the build) ---")
+    local ok = true
+    local function chk(v) ok = ok and v; return v and "PASS" or "FAIL" end
+    local function bar(nm, ok, got, want)
+        print(string.format("  %-4s %-58s %s   (got %s, want %s)", nm, "", ok and "PASS" or "FAIL", got, want))
+    end
+    print(string.format("  R1  recall is exactly 9 CONVERTs, and the SAME nine        %s   (got %d, want 9)",
+        chk(corp.convert == 9), corp.convert))
+    print(string.format("  R2  non-conversion splits thin 4 / far 5 / march_cd 2 / spent 0  %s   (got %d/%d/%d/%d)",
+        chk(corp.thin == 4 and corp.far == 5 and corp.march_cd == 2 and corp.spent == 0),
+        corp.thin, corp.far, corp.march_cd, corp.spent))
+    local p1 = (corp.expiry == BASE_EXPIRY) and (corp.inband_arr == BASE_INBAND_ARR) and (corp.budget2 == BASE_BUDGET2)
+    print(string.format("  P1  BREAK == 0, proved: expiries %d/%d, in-band arrivals %d/%d, budget casts=2 %d/%d  %s",
+        corp.expiry, BASE_EXPIRY, corp.inband_arr, BASE_INBAND_ARR, corp.budget2, BASE_BUDGET2, chk(p1)))
+    print(string.format("  P2  FREE >= 5 and REDIRECT_LOST <= 5                       %s   (got FREE %d, REDIRECT_LOST %d)",
+        chk(corp.free >= 5 and corp.redirect_lost <= 5), corp.free, corp.redirect_lost))
+    print(string.format("  P3  every CONVERT stands <= 8.0s, median <= 5.0s            %s   (max %.1f, median %.1f)",
+        chk(mx <= 8.0 and med <= 5.0), mx, med))
+    print(string.format("  P4  one w_wait release per commit, each W-wait episode claimed once  %s   (multi-release %d, double-claimed %d)",
+        chk(corp.multi == 0 and corp.dbl == 0), corp.multi, corp.dbl))
+    print("")
+    print("  P2 is the bar most likely to fail and its failure REDIRECTS the work (ship a value gate")
+    print("  first) rather than killing the fix. R1 failing on the SET rather than the count means a")
+    print("  conjunct is being read on the wrong ruler: do not adjust the bar to match the tool.")
+    os.exit(ok and 0 or 1)
 end

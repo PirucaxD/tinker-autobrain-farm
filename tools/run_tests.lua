@@ -6344,6 +6344,294 @@ describe("lib/position_data -- observed lane", function()
 end)
 
 print()
+
+describe("tools/parse_debuglog --dead-band contracts (v0.1.416 relax)", function()
+    -- --dead-band is the ONLY tool that can score the v0.1.416 dead-band relax, and its first cut
+    -- scored the fix's own FAILURE signal as a success: a relax that stood a second window and cast
+    -- NOTHING (rlx=spent) was reported CONVERT FREE, because the classifier re-derived the conjunct
+    -- instead of reading the field the hero now emits. That was found by RUNNING it on a synthetic
+    -- post-ship log, not by reading it, which is why the fixture below exists.
+    local parser do
+        local f = io.open("tools/parse_debuglog.lua", "r")
+        if f then parser = f:read("*a"); f:close() end
+    end
+    local tinker do
+        local f = io.open("Tinker/Tinker.lua", "r")
+        if f then tinker = f:read("*a"); f:close() end
+    end
+
+    it("the mode still exists and is dispatched", function()
+        assert_true(parser ~= nil, "cannot open tools/parse_debuglog.lua (run from the repo root)")
+        assert_true(parser:find('mode == "dead_band"', 1, true) ~= nil, "the dead_band mode block is gone")
+        assert_true(parser:find('a == "--dead-band"', 1, true) ~= nil, "--dead-band is no longer dispatched")
+        assert_true(parser:find('mode ~= "dead_band"', 1, true) ~= nil,
+            "dead_band missing from the timeline-fallback exclusion list")
+    end)
+
+    it("THE K MIRROR: the constants the mode hardcodes still equal Tinker's K", function()
+        if not tinker then
+            print("  SKIP  dead-band K mirror: Tinker/Tinker.lua not present in this tree")
+            return
+        end
+        local mirror = parser:match("local ENGAGE, CAST_REACH, RELEASE_S%s*=%s*([^\n]+)")
+        assert_true(mirror ~= nil, "the dead_band K mirror line was renamed: re-point this test at it")
+        local got = {}
+        for v in mirror:gmatch("[%d%.]+") do got[#got + 1] = tonumber(v) end
+        assert_eq(#got, 3, "expected 3 mirrored constants on the dead_band mirror line")
+        for _, pair in ipairs({ { "WAVE_ENGAGE_RANGE", got[1] }, { "W_CAST_REACH", got[2] }, { "W_WAIT_RELEASE_S", got[3] } }) do
+            local live = tinker:match("%f[%w]" .. pair[1] .. "%s*=%s*([%d%.]+)")
+            assert_true(live ~= nil, "no K." .. pair[1] .. " found in Tinker.lua")
+            assert_eq(pair[2], tonumber(live),
+                ("K.%s moved to %s but --dead-band still mirrors %s: it is now scoring a rule the hero does not run")
+                :format(pair[1], live, tostring(pair[2])))
+        end
+    end)
+
+    it("THE EMITTER CONTRACT: the hero still emits what the replay reads", function()
+        if not tinker then
+            print("  SKIP  dead-band emitter contract: Tinker/Tinker.lua not present in this tree")
+            return
+        end
+        -- The MODE replays any log, but these assertions are about the v0.1.416 RELAX and a tree
+        -- carrying an older hero is a legitimate state (the public mirror ships the last VALIDATED
+        -- build, and v0.1.416 was rolled back on 2026-09-03). A contract test must not hard-fail on
+        -- a valid hero it simply predates: skip loudly, the way the absent-file guard above does.
+        if not tinker:find("s.wwRelax", 1, true) then
+            print("  SKIP  dead-band emitter contract: this Tinker.lua predates v0.1.416 (no relax)")
+            return
+        end
+        for _, pair in ipairs({
+            { 'w_wait_relax lane=%s dref=%.0f n=%d t=%.1f', "the relax line the post-ship census counts" },
+            { 'engage_release reason=w_wait dref=%.0f n=%d casts=%d rlx=%s', "the release line, and its rlx= conjunct" },
+            { 's.wwRelax', "the per-commit latch the whole rule hangs on" },
+        }) do
+            assert_true(tinker:find(pair[1], 1, true) ~= nil,
+                ("--dead-band depends on '%s' and Tinker.lua no longer has it (%s)"):format(pair[1], pair[2]))
+        end
+        -- and the rule must keep BOTH bounds: the worth test and the arrival-ruler bound
+        assert_true(tinker:find("s.wwRelax and dref0 <= K.WAVE_ENGAGE_RANGE", 1, true) ~= nil,
+            "the relaxed first-cast gate lost its WAVE_ENGAGE_RANGE bound: the reach is now unbounded")
+        assert_true(parser:find("kv.rlx", 1, true) ~= nil,
+            "the replay stopped reading the emitted rlx= field and is re-deriving it again")
+    end)
+
+    it("A FAILED RELAX SCORES spent, NOT convert (the defect this block exists for)", function()
+        local dir = "tools/testdata"
+        local tmp = dir .. "/.dead_band_tmp.log"
+        local w = assert(io.open(tmp, "w"))
+        w:write(table.concat({
+            "[INFO] [Tinker] Tinker brain v0.1.416 fixture",
+            "[INFO] [Tinker] farm | pick=shove | lane=mid | asrc=kin | vis=y | e=3 | t=100.0",
+            "[INFO] [Tinker] wave_engage_arrived dWave=600 dref=812 creeps=3 trig=dist eta_err=+0.1",
+            "[INFO] [Tinker] w_wait_relax lane=mid dref=812 n=3 t=104.0",
+            "[INFO] [Tinker] wait_end why=W wait dur=4.1",
+            "[INFO] [Tinker] engage_release reason=w_wait dref=805 n=3 casts=0 rlx=spent/ok",
+            "[INFO] [Tinker] farm | pick=none | reason=shove_stuck | t=108.0",
+        }, "\n") .. "\n")
+        w:close()
+        local exe = os.getenv("LUA_EXE") or (arg and arg[-1]) or "lua"
+        local ph = io.popen(string.format('%s tools/parse_debuglog.lua "%s" --dead-band 2>&1', exe, tmp))
+        local out = ph and ph:read("*a") or ""
+        if ph then ph:close() end
+        os.remove(tmp)
+        assert_true(out:find("POST%-SHIP CENSUS") ~= nil,
+            "a log containing w_wait_relax must switch to the post-ship census, not print the frozen pre-ship bars:\n" .. out)
+        local conv = tonumber(out:match("CONVERT (%d+) | NEUTRAL"))
+        local spent = tonumber(out:match("spent (%d+)%s*%("))
+        assert_eq(conv, 0, "a relax that cast NOTHING was scored as a conversion:\n" .. out)
+        assert_eq(spent, 1, "the emitted rlx=spent conjunct was not counted:\n" .. out)
+        assert_true(out:find("relaxes 1", 1, true) ~= nil, "the relax itself was not counted:\n" .. out)
+    end)
+end)
+
+describe("tools/parse_debuglog --thin-release contracts (Piece C tripwire)", function()
+    -- WHY THIS BLOCK EXISTS. --thin-release carries the REOPEN TRIPWIRE for a decision that was
+    -- CLOSED (TINKER_GROUND_TRACKING_DESIGN.md sec 7): Piece C reopens only if its STATUE column
+    -- reaches 3 over a 10-game corpus. So a silent break here does not produce a wrong number, it
+    -- produces a PERMANENT ZERO, and nobody ever learns the decision should have been revisited.
+    -- That is this project's most expensive documented failure class, twice over: the DEATHS gate
+    -- matched a literal version pattern and printed UNKNOWN for three games on builds that carried
+    -- the instrument, and the WAVE_PHASE mirror sat stale for dozens of builds precisely BECAUSE
+    -- the analyzer's copy agreed with the hero's stale constant, so the report kept measuring the
+    -- wrong grid instead of flagging it. The mode's own header says "MIRRORS of Tinker K: move them
+    -- here in the same commit if K moves". A COMMENT IS NOT A GATE. This block is the gate.
+    local parser do
+        local f = io.open("tools/parse_debuglog.lua", "r")
+        if f then parser = f:read("*a"); f:close() end
+    end
+    local tinker do
+        local f = io.open("Tinker/Tinker.lua", "r")
+        if f then tinker = f:read("*a"); f:close() end
+    end
+
+    it("the mode still exists and is dispatched", function()
+        assert_true(parser ~= nil, "cannot open tools/parse_debuglog.lua (run from the repo root)")
+        assert_true(parser:find('mode == "thin_release"', 1, true) ~= nil,
+            "the thin_release mode block is gone: the Piece C tripwire cannot be evaluated")
+        assert_true(parser:find('a == "--thin-release"', 1, true) ~= nil,
+            "--thin-release is no longer dispatched, so the mode is unreachable from the CLI")
+        -- the timeline fallback must keep excluding it, or the mode prints a raw event dump too
+        assert_true(parser:find('mode ~= "thin_release"', 1, true) ~= nil,
+            "thin_release missing from the timeline-fallback exclusion list")
+    end)
+
+    it("THE K MIRROR: every constant the mode hardcodes still equals Tinker's K", function()
+        if not tinker then
+            print("  SKIP  thin-release K mirror: Tinker/Tinker.lua not present in this tree")
+            return
+        end
+        -- Read the mode's mirror line and the hero's K table, and prove they agree. Written as a
+        -- single tuple assignment in the mode, so parse it positionally against the same order.
+        local mirror = parser:match("local ENGAGE, CLOSE_MIN, THIN_EHP, LONE_N, LONE_HOLD%s*=%s*([^\n]+)")
+        assert_true(mirror ~= nil,
+            "the thin_release K mirror line was renamed or removed: re-point this test at it")
+        local got = {}
+        for v in mirror:gmatch("[%d%.]+") do got[#got + 1] = tonumber(v) end
+        assert_eq(#got, 5, "expected 5 mirrored constants on the thin_release mirror line")
+        local want = {
+            { "WAVE_ENGAGE_RANGE", got[1] },
+            { "W_CLOSING_MIN",     got[2] },
+            { "SHOVE_THIN_EFFHP",  got[3] },
+            { "SHOVE_THIN_CREEPS", got[4] },
+            { "THIN_CREEPS_HOLD_S", got[5] },
+        }
+        for _, pair in ipairs(want) do
+            local name, mirrored = pair[1], pair[2]
+            local live = tinker:match("%f[%w]" .. name .. "%s*=%s*([%d%.]+)")
+            assert_true(live ~= nil, "no K." .. name .. " found in Tinker.lua")
+            assert_eq(mirrored, tonumber(live),
+                ("K.%s moved to %s but --thin-release still mirrors %s: the Piece C tripwire is now " ..
+                 "measuring a rule the hero does not run"):format(name, live, tostring(mirrored)))
+        end
+    end)
+
+    it("THE TOKEN CONTRACT: the log fields the replay reads are still emitted", function()
+        if not tinker then
+            print("  SKIP  thin-release token contract: Tinker/Tinker.lua not present in this tree")
+            return
+        end
+        -- Each entry: the emitter substring that must survive in Tinker.lua, and why the replay
+        -- needs it. A rename here does not crash the mode, it silently empties a clause, which is
+        -- the born-dead-instrument class (v0.1.348 walk_leg, v0.1.346 keen probe).
+        local need = {
+            { "w_lead_reject why=",      "the per-tick rows that carry dref/close/wgn: no rows, no replay" },
+            { "dref=%.0f close=%.3f",    "the far and held clauses read these two fields off that row" },
+            { "wavescan ln=%s e=%d",     "the 2s lane scan the DECIDE thin ruler is dated from" },
+            { "wave_engage_arrived",     "the arrival that resets the far+held latch" },
+            { "march_aim src=shove_pre", "a pre-cast lead fire, which makes a replayed release a CUT" },
+            { "stall_release lane=",     "the exit that defines the STATUE column, i.e. the tripwire itself" },
+            -- keen_home's line is ASSEMBLED at runtime (verify_cast adds " FIRED", the purpose comes
+            -- from a format arg), so the contiguous literal never exists in source: assert the halves.
+            { 'verify_cast("keen_home"', "exit filtering: only return and panic end a commit" },
+            { " purpose=%s",             "the purpose field the exit filter reads off keen_home" },
+        }
+        for _, pair in ipairs(need) do
+            assert_true(tinker:find(pair[1], 1, true) ~= nil,
+                ("--thin-release reads '%s' but Tinker.lua no longer emits it (%s)"):format(pair[1], pair[2]))
+        end
+        -- and the mode must still be looking for them
+        -- the mode names these tokens in mixed syntax (quoted compares, bare EXIT_EV table keys,
+        -- and a ^-anchored match for the STATUE column), so assert the TOKEN, not a quoting style.
+        local mode_src = parser:match('mode == "thin_release"(.*)') or ""
+        for _, tok in ipairs({ "w_lead_reject", "wave_engage_arrived", "stall_release", "march_aim", "wavescan" }) do
+            assert_true(mode_src:find(tok, 1, true) ~= nil,
+                "the thin_release replay stopped referencing the " .. tok .. " token")
+        end
+    end)
+
+    it("THE RE-ANCHOR CENSUS reports repeats, not just the raw count", function()
+        -- The bridge has listed the re-anchor census as a standing every-game read since v0.1.415
+        -- shipped, and for two builds no mode knew the token existed, so it was read with ad-hoc
+        -- greps. The number that matters is NOT the raw count: g409/g410/g411 ran 0/2/19 fires,
+        -- which reads as an explosion, while what actually moved is redundant repeats (0/0/6) and
+        -- the longest run of consecutive fires at the same d (1/1/5). Pin all three so a future
+        -- edit cannot quietly collapse the census back to a count.
+        local dir = "tools/testdata"
+        local f = io.open(dir .. "/thin_release_fixture.log", "r")
+        assert_true(f ~= nil, "missing the fixture this check appends to")
+        local base = f:read("*a"); f:close()
+        local tmp = dir .. "/.reanchor_tmp.log"
+        local w = assert(io.open(tmp, "w"))
+        -- d=100 twice in a row then d=200: 3 fires, 1 redundant, longest same-d run 2
+        w:write(base ..
+            "[INFO] [Tinker] reanchor d=100 -> redecide\n" ..
+            "[INFO] [Tinker] reanchor d=100 -> redecide\n" ..
+            "[INFO] [Tinker] reanchor d=200 -> redecide\n")
+        w:close()
+        local exe = os.getenv("LUA_EXE") or (arg and arg[-1]) or "lua"
+        local ph = io.popen(string.format('%s tools/parse_debuglog.lua "%s" --farm-report 2>&1', exe, tmp))
+        local out = ph and ph:read("*a") or ""
+        if ph then ph:close() end
+        os.remove(tmp)
+        local fires, redundant, run = out:match("re%-anchor census[^:]*: (%d+) fires, (%d+) redundant[^%d]*(%d+)")
+        assert_true(fires ~= nil, "the re-anchor census line is gone from --farm-report:\n" .. out)
+        assert_eq(tonumber(fires), 3, "fire count wrong")
+        assert_eq(tonumber(redundant), 1, "redundant-repeat count wrong: a repeated d must be counted")
+        assert_eq(tonumber(run), 2, "longest same-d run wrong: consecutive same-d fires are the flutter signal")
+        -- and a log with no re-anchors must say so rather than printing nothing
+        local ph2 = io.popen(string.format('%s tools/parse_debuglog.lua "%s" --farm-report 2>&1', exe, dir .. "/thin_release_fixture.log"))
+        local out2 = ph2 and ph2:read("*a") or ""
+        if ph2 then ph2:close() end
+        assert_true(out2:find("re%-anchor census") ~= nil and out2:find("0 fires", 1, true) ~= nil,
+            "a log with no re-anchors must still report the census as 0, not print nothing")
+    end)
+
+    it("THE REPLAY: a synthetic statue scores STATUE, and each clause can veto it", function()
+        -- The smallest end-to-end check: build a log holding ONE textbook statue (pre-cast, far,
+        -- held, the decide ruler thin on a real read, no cast, exiting at stall_release), run the
+        -- real mode on it, and require STATUE = 1. Then mutate ONE clause at a time and require
+        -- the fire to disappear. Without the mutations this test would pass on a mode that fires
+        -- unconditionally, which is the "calibrate on recall AND precision" lesson.
+        local dir = "tools/testdata"
+        local path = dir .. "/thin_release_fixture.log"
+        local f = io.open(path, "r")
+        assert_true(f ~= nil, "missing fixture " .. path)
+        local base = f:read("*a"); f:close()
+
+        local function run(text)
+            local tmp = dir .. "/.thin_release_tmp.log"
+            local w = assert(io.open(tmp, "w")); w:write(text); w:close()
+            -- arg[-1] is the interpreter running THIS suite, so the check works from any install
+            -- without needing a PATH entry (this project invokes lua by absolute path).
+            local exe = os.getenv("LUA_EXE") or (arg and arg[-1]) or "lua"
+            local p = io.popen(string.format('%s tools/parse_debuglog.lua "%s" --thin-release 2>&1', exe, tmp))
+            local out = p and p:read("*a") or ""
+            if p then p:close() end
+            os.remove(tmp)
+            return out
+        end
+        local function statue_of(out)
+            -- the corpus line: "S    2.0  <fires> <good> <good5> <statue> ..."
+            return tonumber(out:match("\nS%s+2%.0%s+%d+%s+%d+%s+%d+%s+(%d+)"))
+        end
+
+        local out = run(base)
+        assert_true(out:find("thin-release precheck", 1, true) ~= nil,
+            "the mode did not run on the fixture:\n" .. out)
+        assert_eq(statue_of(out), 1, "the fixture statue no longer scores STATUE=1:\n" .. out)
+
+        -- MUTATIONS, one clause each. Every one must kill the fire.
+        -- (a) not thin: the wave reads healthy on the real scan
+        assert_eq(statue_of(run((base:gsub("hp=393", "hp=1950"):gsub("hp=300", "hp=1900")))), 0,
+            "a HEALTHY wave still fires: the thin clause is dead")
+        -- (b) not far: the wave is inside engage range, so an arrival can serve it
+        assert_eq(statue_of(run(base:gsub("dref=1184", "dref=800"))), 0,
+            "a NEAR wave still fires: the far clause is dead")
+        -- (c) not held: the wave is closing fast, warm EMA
+        assert_eq(statue_of(run(base:gsub("close=0%.000", "close=325.000"))), 0,
+            "a CLOSING wave still fires: the held clause is dead")
+        -- (d) fogged: an ESTIMATED read must never veto (the v0.1.241 law)
+        assert_eq(statue_of(run(base:gsub("est=n", "est=y"))), 0,
+            "an ESTIMATED read still fires: this violates the v0.1.241 estimates-never-veto law")
+        -- HONEST LIMIT OF (d), do not read it as more than it is. It pins the COARSE law: a commit
+        -- whose reads are all estimated never fires. It does NOT pin the thin latch's fog RESET,
+        -- which was mutation-verified as unobservable here: deleting that reset still yields 0,
+        -- because the freshness guard (scan.est == "n" on the CURRENT scan) already blocks a fogged
+        -- tick on its own. The reset only re-dates P across a real-fog-real gap, which shifts the
+        -- release time without changing whether it fires, so no STATUE assertion can see it.
+    end)
+end)
+
 print(string.format("%d passed, %d failed", pass, fail))
 if fail > 0 then
     print()

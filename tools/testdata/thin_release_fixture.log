@@ -1,0 +1,35 @@
+[INFO] [Tinker] Tinker brain v0.1.415 fixture
+[INFO] [Tinker] farm | klvl=1 | pick=shove | lane=mid | asrc=sim | vis=y | e=3 | reason=near_due | t=299.1
+[INFO] [Tinker] w_lead_reject why=cap ln=mid tarr=-1.00 eff=-1.00 dref=9470 close=0.000 dstand=9843 n=3 wgn=0
+[INFO] [Tinker] keen_to_anchor anchor=bldg land=(30,157) residual=374 cexcl=0 jump=9470 mana=644
+[INFO] [Tinker] keen FIRED
+[INFO] [Tinker] wavescan SCAN t=301.0 wave=11 pred=321.0 kpred=304.9 lastw=231.0
+[INFO] [Tinker] wavescan ln=mid e=2 est=n src=- comp=- a=3 hp=854 gold=130 push=even/hold crash=- bal=0 peta=318.2 eta=10.7 reach=false enH=1 alH=1
+[INFO] [Tinker] w_lead_reject why=thin ln=mid tarr=-1.00 eff=-1.00 dref=1184 close=0.000 dstand=374 n=2 wgn=24
+[INFO] [Tinker] w_lead_reject why=thin ln=mid tarr=-1.00 eff=-1.00 dref=1184 close=0.000 dstand=374 n=2 wgn=45
+[INFO] [Tinker] wavescan SCAN t=303.0 wave=11 pred=321.0 kpred=305.0 lastw=231.0
+[INFO] [Tinker] wavescan ln=mid e=2 est=n src=- comp=- a=1 hp=705 gold=91 push=enemy crash=- bal=-2 peta=307.2 eta=4.5 reach=true enH=1 alH=2
+[INFO] [Tinker] w_lead_reject why=thin ln=mid tarr=-1.00 eff=-1.00 dref=1184 close=0.000 dstand=374 n=2 wgn=70
+[INFO] [Tinker] w_lead_reject why=thin ln=mid tarr=-1.00 eff=-1.00 dref=1184 close=0.000 dstand=374 n=2 wgn=91
+[INFO] [Tinker] wavescan SCAN t=305.0 wave=11 pred=321.0 kpred=306.4 lastw=231.0
+[INFO] [Tinker] wavescan ln=mid e=2 est=n src=- comp=- a=1 hp=573 gold=91 push=enemy crash=- bal=-2 peta=306.2 eta=5.3 reach=true enH=1 alH=2
+[INFO] [Tinker] w_lead_reject why=thin ln=mid tarr=-1.00 eff=-1.00 dref=1184 close=0.000 dstand=374 n=2 wgn=111
+[INFO] [Tinker] w_lead_reject why=thin ln=mid tarr=-1.00 eff=-1.00 dref=1184 close=0.000 dstand=374 n=2 wgn=131
+[INFO] [Tinker] wavescan SCAN t=307.0 wave=11 pred=321.0 kpred=309.6 lastw=231.0
+[INFO] [Tinker] wavescan ln=mid e=2 est=n src=- comp=- a=1 hp=393 gold=91 push=enemy crash=- bal=-1 peta=313.2 eta=1.9 reach=true enH=1 alH=2
+[INFO] [Tinker] w_lead_reject why=thin ln=mid tarr=-1.00 eff=-1.00 dref=1184 close=0.000 dstand=374 n=2 wgn=152
+[INFO] [Tinker] w_lead_reject why=thin ln=mid tarr=-1.00 eff=-1.00 dref=1184 close=0.000 dstand=374 n=2 wgn=172
+[INFO] [Tinker] wavescan SCAN t=309.0 wave=11 pred=321.0 kpred=311.5 lastw=231.0
+[INFO] [Tinker] wavescan ln=mid e=2 est=n src=- comp=- a=1 hp=300 gold=52 push=even/hold crash=- bal=0 peta=317.2 eta=3.0 reach=true enH=1 alH=2
+[INFO] [Tinker] w_lead_reject why=thin ln=mid tarr=-1.00 eff=-1.00 dref=1184 close=0.000 dstand=374 n=2 wgn=193
+[INFO] [Tinker] w_lead_reject why=thin ln=mid tarr=-1.00 eff=-1.00 dref=1184 close=0.000 dstand=374 n=2 wgn=213
+[INFO] [Tinker] wavescan SCAN t=311.0 wave=11 pred=321.0 kpred=315.5 lastw=231.0
+[INFO] [Tinker] wavescan ln=mid e=2 est=n src=- comp=- a=1 hp=300 gold=52 push=enemy crash=- bal=-1 peta=316.2 eta=2.5 reach=true enH=1 alH=2
+[INFO] [Tinker] w_lead_reject why=thin ln=mid tarr=-1.00 eff=-1.00 dref=1184 close=0.000 dstand=374 n=2 wgn=235
+[INFO] [Tinker] wavescan SCAN t=313.0 wave=11 pred=321.0 kpred=321.8 lastw=231.0
+[INFO] [Tinker] wavescan ln=mid e=2 est=n src=- comp=- a=1 hp=300 gold=52 push=even/hold crash=- bal=0 peta=318.2 eta=3.0 reach=true enH=1 alH=1
+[INFO] [Tinker] w_lead_reject why=thin ln=mid tarr=-1.00 eff=-1.00 dref=1184 close=0.000 dstand=374 n=2 wgn=256
+[INFO] [Tinker] stall_release lane=mid dref=1184 close=0.0 casts=0 held=15.1
+[INFO] [Tinker] shove_suppress ln=mid why=stall_release for=15.0
+[INFO] [Tinker] keen_waste lane=mid kind=wave asrc=sim resid=374 held=15.1
+[INFO] [Tinker] farm | klvl=1 | pick=none | reason=shove_stuck | t=314.2
